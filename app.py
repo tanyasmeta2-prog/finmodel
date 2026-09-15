@@ -934,4 +934,436 @@ def build_excel_report() -> bytes:
 
     for j, h in enumerate(EXCEL_HEADERS, start=1):
         ws1.cell(row=header_row1, column=j, value=h)
-    style_header_row(ws1, header_row1, N_COLS_EXC
+    style_header_row(ws1, header_row1, N_COLS_EXCEL)
+
+    # ------------------------------------------------------------------
+    # Лист 2: каталог расценок + расчет себестоимости коробки по блокам
+    # (строится ПЕРЕД заполнением листа 1, т.к. лист 1 на него ссылается)
+    # ------------------------------------------------------------------
+    ws2 = wb.create_sheet(SHEET2_NAME)
+    ws2["A1"] = "Расчет СМР по укрупненным видам работ (действующая методика)"
+    ws2["A1"].font = TITLE_FONT
+    ws2["A2"] = f"Проект: {project_name} | Сценарий: {scenario_name}"
+
+    # Каталог расценок — ставка ИНДИВИДУАЛЬНА для каждого жилого блока: строки —
+    # 32 статьи методики, колонки — Код/Статья/Группа/Единица + одна колонка
+    # ставки на каждый жилой блок (в том же порядке, что на листе 1).
+    ws2["A4"] = "Каталог расценок (ставка — своя колонка на каждый жилой блок)"
+    ws2["A4"].font = PARAM_FONT
+    rates_header_row = 5
+    rate_col_for_block = {name: get_column_letter(5 + idx) for idx, name in enumerate(res_block_names)}
+    rates_headers = ["Код", "Статья затрат", "Группа", "Единица измерения"] + [
+        f"Ставка «{name}», руб/ед." for name in res_block_names
+    ]
+    for j, h in enumerate(rates_headers, start=1):
+        ws2.cell(row=rates_header_row, column=j, value=h)
+    style_header_row(ws2, rates_header_row, len(rates_headers))
+
+    code_to_unit = dict(zip(DEFAULT_RATES_DF["Код"], DEFAULT_RATES_DF["Единица измерения"]))
+    rates_first_row = rates_header_row + 1
+    rate_row_by_code = {}
+    for i, code in enumerate(item_codes_master):
+        r = rates_first_row + i
+        rate_row_by_code[code] = r
+        vals = [code, code_to_name[code], code_to_group[code], code_to_unit[code]]
+        for j, v in enumerate(vals, start=1):
+            style_cell(ws2.cell(row=r, column=j, value=v))
+        for block_idx, name in enumerate(res_block_names):
+            rate_val = float(block_rate_series.get(name, pd.Series(dtype=float)).get(code, 0.0))
+            cell = ws2.cell(row=r, column=5 + block_idx, value=rate_val)
+            style_cell(cell, number_format=MONEY_FMT)
+    rates_last_row = rates_first_row + len(item_codes_master) - 1
+
+    # -- Расчет по блокам: строки = блоки (в том же порядке, что на листе 1) --
+    calc_title_row = rates_last_row + 3
+    ws2.cell(row=calc_title_row, column=1, value="Себестоимость коробки по блокам (только «Жилой блок»)")
+    ws2.cell(row=calc_title_row, column=1).font = PARAM_FONT
+    calc_header_row = calc_title_row + 1
+    item_codes = item_codes_master
+    calc_headers2 = ["Название блока", "Тип блока"] + item_codes + ["ИТОГО СМР коробки, руб"]
+    for j, h in enumerate(calc_headers2, start=1):
+        ws2.cell(row=calc_header_row, column=j, value=h)
+    style_header_row(ws2, calc_header_row, len(calc_headers2))
+
+    calc_first_row = calc_header_row + 1
+    total_col_idx2 = len(calc_headers2)  # последняя колонка — ИТОГО
+    for i, (_, row) in enumerate(blocks.iterrows()):
+        r2 = calc_first_row + i
+        r1 = first_row1 + i  # соответствующая строка на листе 1 (тот же порядок блоков)
+        block_name = row["Название блока"]
+        ws2.cell(row=r2, column=1, value=block_name)
+        ws2.cell(row=r2, column=2, value=row["Тип блока"])
+        style_cell(ws2.cell(row=r2, column=1))
+        style_cell(ws2.cell(row=r2, column=2))
+
+        type_ref = f"'{SHEET1_NAME}'!{COL['Тип блока']}{r1}"
+        rate_col_letter = rate_col_for_block.get(block_name)
+        for k, code in enumerate(item_codes):
+            basis_key = code_to_basis[code]
+            if basis_key == "NSA":
+                qty_ref = f"'{SHEET1_NAME}'!{COL['NSA, м2']}{r1}"
+            elif basis_key == "VOL_TOTAL":
+                qty_ref = f"('{SHEET1_NAME}'!{COL['Объем здания ниже 0, м3']}{r1}+'{SHEET1_NAME}'!{COL['Объем здания выше 0, м3']}{r1})"
+            elif basis_key == "STORAGE_AREA":
+                qty_ref = f"'{SHEET1_NAME}'!{COL['S кладовых, м2']}{r1}"
+            else:
+                basis_col_name = BASIS_COLUMN[basis_key]
+                qty_ref = f"'{SHEET1_NAME}'!{COL[basis_col_name]}{r1}"
+            if rate_col_letter is not None:
+                rate_ref = f"{rate_col_letter}${rate_row_by_code[code]}"
+                formula = f'=IF({type_ref}="{TYPE_RESIDENTIAL}",{qty_ref}*{rate_ref},0)'
+            else:
+                formula = 0  # блок-паркинг — каталога ставок методики у него нет
+            cell = ws2.cell(row=r2, column=3 + k, value=formula)
+            style_cell(cell, number_format=MONEY_FMT)
+
+        first_item_col = get_column_letter(3)
+        last_item_col = get_column_letter(2 + len(item_codes))
+        total_cell = ws2.cell(row=r2, column=total_col_idx2, value=f"=SUM({first_item_col}{r2}:{last_item_col}{r2})")
+        style_cell(total_cell, number_format=MONEY_FMT, bold=True, fill=TOTAL_FILL)
+    calc_last_row = calc_first_row + N_ROWS - 1
+
+    autosize(ws2, len(calc_headers2), width=13)
+    ws2.column_dimensions["A"].width = 16
+    ws2.column_dimensions["B"].width = 24
+    for name, col_letter in rate_col_for_block.items():
+        ws2.column_dimensions[col_letter].width = 16
+
+    # -- Группы работ (для круговой диаграммы) — суммы по прямоугольным
+    #    диапазонам колонок статей внутри каждой группы (колонки статей
+    #    идут подряд, сгруппированы по буквенному коду) --
+    group_order, group_col_ranges = [], {}
+    prev_group = None
+    for k, code in enumerate(item_codes_master):
+        g = code_to_group[code]
+        col_idx = 3 + k
+        if g != prev_group:
+            if prev_group is not None:
+                group_col_ranges[prev_group] = (group_col_ranges[prev_group][0], col_idx - 1)
+            group_col_ranges[g] = (col_idx, col_idx)
+            group_order.append(g)
+            prev_group = g
+        else:
+            group_col_ranges[g] = (group_col_ranges[g][0], col_idx)
+
+    group_table_row0 = calc_last_row + 3
+    ws2.cell(row=group_table_row0, column=1, value="Структура СМР коробки по группам работ")
+    ws2.cell(row=group_table_row0, column=1).font = PARAM_FONT
+    group_header_row = group_table_row0 + 1
+    ws2.cell(row=group_header_row, column=1, value="Группа")
+    ws2.cell(row=group_header_row, column=2, value="Сумма, руб")
+    style_header_row(ws2, group_header_row, 2)
+    for gi, g in enumerate(group_order):
+        r = group_header_row + 1 + gi
+        c1, c2 = group_col_ranges[g]
+        col1_letter, col2_letter = get_column_letter(c1), get_column_letter(c2)
+        label_cell = ws2.cell(row=r, column=1, value=GROUP_LABELS[g])
+        sum_cell = ws2.cell(
+            row=r, column=2,
+            value=f"=SUM({col1_letter}{calc_first_row}:{col2_letter}{calc_last_row})" if N_ROWS > 0 else 0,
+        )
+        style_cell(label_cell)
+        style_cell(sum_cell, number_format=MONEY_FMT)
+    group_last_row = group_header_row + len(group_order)
+
+    # -- Встроенные графики Листа 2 --
+    if N_ROWS > 0:
+        bar2 = BarChart()
+        bar2.type = "col"
+        bar2.title = "Себестоимость коробки по блокам (методика)"
+        bar2.y_axis.title = "руб"
+        bar2.style = 10
+        data_ref2 = Reference(ws2, min_col=total_col_idx2, max_col=total_col_idx2, min_row=calc_header_row, max_row=calc_last_row)
+        cats_ref2 = Reference(ws2, min_col=1, min_row=calc_first_row, max_row=calc_last_row)
+        bar2.add_data(data_ref2, titles_from_data=True)
+        bar2.set_categories(cats_ref2)
+        bar2.series[0].graphicalProperties.solidFill = COLOR_DIRECT_COST
+        bar2.height, bar2.width = 10, 22
+        ws2.add_chart(bar2, f"{get_column_letter(total_col_idx2 + 2)}{calc_header_row}")
+
+        pie2 = PieChart()
+        pie2.title = "Структура СМР коробки по группам работ"
+        data_ref_g = Reference(ws2, min_col=2, min_row=group_header_row, max_row=group_last_row)
+        cats_ref_g = Reference(ws2, min_col=1, min_row=group_header_row + 1, max_row=group_last_row)
+        pie2.add_data(data_ref_g, titles_from_data=True)
+        pie2.set_categories(cats_ref_g)
+        pie2.dataLabels = DataLabelList()
+        pie2.dataLabels.showPercent = True
+        pie2.series[0].data_points = [
+            DataPoint(idx=i, spPr=GraphicalProperties(solidFill=GROUP_COLORS[i % len(GROUP_COLORS)]))
+            for i in range(len(group_order))
+        ]
+        pie2.height, pie2.width = 10, 14
+        ws2.add_chart(pie2, f"{get_column_letter(total_col_idx2 + 2)}{calc_header_row + 22}")
+
+    # ------------------------------------------------------------------
+    # Наружные работы (G) — на весь проект, живые формулы. Статьи на площадь
+    # участка ссылаются на ОДНУ ячейку площади (ТЭП, лист «Исходные данные»);
+    # сети/кабели считаются по кол-ву, введенному вручную построчно.
+    # ------------------------------------------------------------------
+    g_title_row = group_last_row + 3
+    ws2.cell(row=g_title_row, column=1, value="Наружные работы (код G, на весь проект)")
+    ws2.cell(row=g_title_row, column=1).font = PARAM_FONT
+    ws2.cell(row=g_title_row, column=4, value="Площадь участка, га (ТЭП):")
+    site_area_cell = ws2.cell(row=g_title_row, column=5, value=float(st.session_state.site_area_ga))
+    style_cell(site_area_cell, number_format="0.0")
+    site_area_ref = f"$E${g_title_row}"
+
+    g_header_row = g_title_row + 1
+    g_headers = ["Код", "Статья затрат", "Единица измерения", "Кол-во", "Ставка, руб/ед.", "Сумма, руб"]
+    for j, h in enumerate(g_headers, start=1):
+        ws2.cell(row=g_header_row, column=j, value=h)
+    style_header_row(ws2, g_header_row, len(g_headers))
+
+    g_area_first_row = g_header_row + 1
+    for i, (_, row) in enumerate(g_area_df.iterrows()):
+        r = g_area_first_row + i
+        style_cell(ws2.cell(row=r, column=1, value=row["Код"]))
+        style_cell(ws2.cell(row=r, column=2, value=row["Статья затрат"]))
+        style_cell(ws2.cell(row=r, column=3, value=row["Единица измерения"]))
+        qty_cell = ws2.cell(row=r, column=4, value=f"={site_area_ref}")
+        style_cell(qty_cell, number_format="0.0")
+        rate_cell = ws2.cell(row=r, column=5, value=row["Ставка, руб/ед."])
+        style_cell(rate_cell, number_format=MONEY_FMT)
+        sum_cell = ws2.cell(row=r, column=6, value=f"=D{r}*E{r}")
+        style_cell(sum_cell, number_format=MONEY_FMT)
+    g_area_last_row = g_area_first_row + len(g_area_df) - 1
+
+    g_length_first_row = g_area_last_row + 1
+    for i, (_, row) in enumerate(g_length_df.iterrows()):
+        r = g_length_first_row + i
+        vals = [row["Код"], row["Статья затрат"], row["Единица измерения"], row["Кол-во"], row["Ставка, руб/ед."]]
+        for j, v in enumerate(vals, start=1):
+            cell = ws2.cell(row=r, column=j, value=v)
+            style_cell(cell, number_format=(MONEY_FMT if j in (4, 5) else None))
+        sum_cell = ws2.cell(row=r, column=6, value=f"=D{r}*E{r}")
+        style_cell(sum_cell, number_format=MONEY_FMT)
+    g_length_last_row = g_length_first_row + len(g_length_df) - 1
+    g_last_row = g_length_last_row
+
+    g_total_row = g_last_row + 1
+    ws2.cell(row=g_total_row, column=1, value="ИТОГО G")
+    style_cell(ws2.cell(row=g_total_row, column=1), bold=True, fill=TOTAL_FILL)
+    g_total_cell = ws2.cell(row=g_total_row, column=6, value=f"=SUM(F{g_area_first_row}:F{g_length_last_row})")
+    style_cell(g_total_cell, number_format=MONEY_FMT, bold=True, fill=TOTAL_FILL)
+
+    # Итого СМР коробки по всем блокам — нужно как часть базы для % статей Z
+    smr_box_total_row = g_total_row + 1
+    ws2.cell(row=smr_box_total_row, column=1, value="ИТОГО СМР коробки (все блоки)")
+    style_cell(ws2.cell(row=smr_box_total_row, column=1), bold=True)
+    smr_box_formula = (
+        f"=SUM({get_column_letter(total_col_idx2)}{calc_first_row}:{get_column_letter(total_col_idx2)}{calc_last_row})"
+        if N_ROWS > 0 else 0
+    )
+    style_cell(ws2.cell(row=smr_box_total_row, column=6, value=smr_box_formula), number_format=MONEY_FMT, bold=True)
+
+    zg_base_row = smr_box_total_row + 1
+    ws2.cell(row=zg_base_row, column=1, value="База для % статей Z (СМР коробки + G)")
+    style_cell(ws2.cell(row=zg_base_row, column=1), bold=True)
+    zg_base_cell = ws2.cell(row=zg_base_row, column=6, value=f"=F{smr_box_total_row}+F{g_total_row}")
+    style_cell(zg_base_cell, number_format=MONEY_FMT, bold=True)
+
+    # ------------------------------------------------------------------
+    # Прочие затраты, связанные с СМР (Z) — % от СМР+G, и статьи прямым вводом
+    # ------------------------------------------------------------------
+    z_title_row = zg_base_row + 3
+    ws2.cell(row=z_title_row, column=1, value="Прочие затраты, связанные с СМР (код Z, на весь проект)")
+    ws2.cell(row=z_title_row, column=1).font = PARAM_FONT
+
+    z_pct_header_row = z_title_row + 1
+    z_pct_headers = ["Код", "Статья затрат", "Ставка, доля от СМР+G", "Сумма, руб"]
+    for j, h in enumerate(z_pct_headers, start=1):
+        ws2.cell(row=z_pct_header_row, column=j, value=h)
+    style_header_row(ws2, z_pct_header_row, len(z_pct_headers))
+
+    z_pct_first_row = z_pct_header_row + 1
+    for i, (_, row) in enumerate(z_pct_df.iterrows()):
+        r = z_pct_first_row + i
+        style_cell(ws2.cell(row=r, column=1, value=row["Код"]))
+        style_cell(ws2.cell(row=r, column=2, value=row["Статья затрат"]))
+        rate_cell = ws2.cell(row=r, column=3, value=row["Ставка, доля от СМР+G"])
+        style_cell(rate_cell, number_format=PERCENT_FMT)
+        sum_cell = ws2.cell(row=r, column=4, value=f"=$F${zg_base_row}*C{r}")
+        style_cell(sum_cell, number_format=MONEY_FMT)
+    z_pct_last_row = z_pct_first_row + len(z_pct_df) - 1 if len(z_pct_df) > 0 else z_pct_first_row - 1
+
+    z_fixed_header_row = z_pct_last_row + 3 if len(z_pct_df) > 0 else z_pct_first_row + 2
+    ws2.cell(row=z_fixed_header_row - 1, column=1, value="Статьи с прямым вводом суммы (нет формульной базы)")
+    ws2.cell(row=z_fixed_header_row - 1, column=1).font = PARAM_FONT
+    z_fixed_headers = ["Код", "Статья затрат", "Сумма, руб"]
+    for j, h in enumerate(z_fixed_headers, start=1):
+        ws2.cell(row=z_fixed_header_row, column=j, value=h)
+    style_header_row(ws2, z_fixed_header_row, len(z_fixed_headers))
+
+    z_fixed_first_row = z_fixed_header_row + 1
+    for i, (_, row) in enumerate(z_fixed_df.iterrows()):
+        r = z_fixed_first_row + i
+        style_cell(ws2.cell(row=r, column=1, value=row["Код"]))
+        style_cell(ws2.cell(row=r, column=2, value=row["Статья затрат"]))
+        sum_cell = ws2.cell(row=r, column=3, value=row["Сумма, руб"])
+        style_cell(sum_cell, number_format=MONEY_FMT)
+    z_fixed_last_row = z_fixed_first_row + len(z_fixed_df) - 1 if len(z_fixed_df) > 0 else z_fixed_first_row - 1
+
+    z_total_row = max(z_fixed_last_row, z_pct_last_row) + 1
+    ws2.cell(row=z_total_row, column=1, value="ИТОГО Z")
+    style_cell(ws2.cell(row=z_total_row, column=1), bold=True, fill=TOTAL_FILL)
+    z_pct_sum = f"SUM(D{z_pct_first_row}:D{z_pct_last_row})" if len(z_pct_df) > 0 else "0"
+    z_fixed_sum = f"SUM(C{z_fixed_first_row}:C{z_fixed_last_row})" if len(z_fixed_df) > 0 else "0"
+    z_total_cell = ws2.cell(row=z_total_row, column=4, value=f"={z_pct_sum}+{z_fixed_sum}")
+    style_cell(z_total_cell, number_format=MONEY_FMT, bold=True, fill=TOTAL_FILL)
+
+    autosize(ws2, 6, width=14)
+    ws2.column_dimensions["B"].width = 30
+
+    # Пул косвенных расходов на Листе 1 = статьи сайдбара (Земля/Соцобъекты/
+    # Сети/Благоустройство/Soft costs) + ИТОГО G + ИТОГО Z (живая ссылка).
+    ws1["H4"] = f"={indirect_pool_sidebar:.2f}+'{SHEET2_NAME}'!F{g_total_row}+'{SHEET2_NAME}'!D{z_total_row}"
+    ws1["H4"].number_format = MONEY_FMT
+
+    # ------------------------------------------------------------------
+    # Возвращаемся к листу 1: входные данные + формулы (ссылаются на лист 2)
+    # ------------------------------------------------------------------
+    for i, (_, row) in enumerate(blocks.iterrows()):
+        r1 = first_row1 + i
+        input_values = [row[h] for h in EXCEL_INPUT_HEADERS]
+        for j, v in enumerate(input_values, start=1):
+            cell = ws1.cell(row=r1, column=j, value=v)
+            style_cell(cell, number_format=(MONEY_FMT if j >= 3 else None))
+
+        r2 = calc_first_row + i
+        c = COL
+        f_nsa = f'=IF({c["Тип блока"]}{r1}="{TYPE_RESIDENTIAL}",{c["S квартир, м2"]}{r1}+{c["S коммерции 1 эт., м2"]}{r1}+{c["S кладовых, м2"]}{r1},0)'
+        f_share = f'=IF(SUM(${c["NSA, м2"]}${first_row1}:${c["NSA, м2"]}${last_row1})=0,0,{c["NSA, м2"]}{r1}/SUM(${c["NSA, м2"]}${first_row1}:${c["NSA, м2"]}${last_row1}))'
+        f_alloc = f'={c["Доля аллокации"]}{r1}*$H$4*$E$4'
+        f_korobka = f"='{SHEET2_NAME}'!{get_column_letter(total_col_idx2)}{r2}"
+        f_direct = (
+            f'=IF({c["Тип блока"]}{r1}="{TYPE_RESIDENTIAL}",'
+            f'({c["Себестоимость коробки (методика)"]}{r1}+{c["Подземный паркинг, м/м"]}{r1}*{c["Ставка СМР подземного м/м, руб"]}{r1})*$E$4,'
+            f'{c["Наземный/Многоуровневый паркинг, м/м"]}{r1}*{c["Ставка СМР наземного м/м, руб"]}{r1}*$E$4)'
+        )
+        f_full = f'={c["Аллоцированные затраты"]}{r1}+{c["Прямые затраты"]}{r1}'
+        f_revenue = (
+            f'=IF({c["Тип блока"]}{r1}="{TYPE_RESIDENTIAL}",'
+            f'({c["S квартир, м2"]}{r1}*{c["Цена жилья, руб/м2"]}{r1}'
+            f'+{c["S коммерции 1 эт., м2"]}{r1}*{c["Цена коммерции, руб/м2"]}{r1}'
+            f'+{c["S кладовых, м2"]}{r1}*{c["Цена кладовых, руб/м2"]}{r1}'
+            f'+{c["Подземный паркинг, м/м"]}{r1}*{c["Цена подземного м/м, руб"]}{r1})*$B$4,'
+            f'{c["Наземный/Многоуровневый паркинг, м/м"]}{r1}*{c["Цена наземного м/м, руб"]}{r1}*$B$4)'
+        )
+        f_profit = f'={c["Выручка"]}{r1}-{c["Полные затраты"]}{r1}'
+        f_margin = f'=IF({c["Выручка"]}{r1}=0,0,{c["Валовая прибыль"]}{r1}/{c["Выручка"]}{r1})'
+
+        calc_formulas = [f_nsa, f_share, f_alloc, f_korobka, f_direct, f_full, f_revenue, f_profit, f_margin]
+        for k, formula in enumerate(calc_formulas):
+            col_idx = len(EXCEL_INPUT_HEADERS) + 1 + k
+            cell = ws1.cell(row=r1, column=col_idx, value=formula)
+            header_name = EXCEL_CALC_HEADERS[k]
+            fmt = PERCENT_FMT if header_name in ("Доля аллокации", "Рентабельность") else MONEY_FMT
+            style_cell(cell, number_format=fmt)
+
+    total_row1 = last_row1 + 1 if N_ROWS > 0 else first_row1
+    ws1.cell(row=total_row1, column=1, value="ИТОГО")
+    if N_ROWS > 0:
+        for header_name in ["NSA, м2", "Доля аллокации", "Аллоцированные затраты", "Себестоимость коробки (методика)",
+                             "Прямые затраты", "Полные затраты", "Выручка", "Валовая прибыль"]:
+            col_letter = COL[header_name]
+            ws1[f"{col_letter}{total_row1}"] = f"=SUM({col_letter}{first_row1}:{col_letter}{last_row1})"
+        ws1[f'{COL["Рентабельность"]}{total_row1}'] = (
+            f'=IF({COL["Выручка"]}{total_row1}=0,0,{COL["Валовая прибыль"]}{total_row1}/{COL["Выручка"]}{total_row1})'
+        )
+    else:
+        for header_name in EXCEL_CALC_HEADERS:
+            ws1[f"{COL[header_name]}{total_row1}"] = 0
+    for j in range(1, N_COLS_EXCEL + 1):
+        cell = ws1.cell(row=total_row1, column=j)
+        header_name = EXCEL_HEADERS[j - 1]
+        fmt = PERCENT_FMT if header_name in ("Доля аллокации", "Рентабельность") else (MONEY_FMT if j >= 3 else None)
+        style_cell(cell, number_format=fmt, bold=True, fill=TOTAL_FILL)
+
+    autosize(ws1, N_COLS_EXCEL, width=14)
+    ws1.column_dimensions["A"].width = 16
+    ws1.column_dimensions["B"].width = 26
+
+    if N_ROWS > 0:
+        bar = BarChart()
+        bar.type = "col"
+        bar.title = "Выручка vs Полные затраты по блокам"
+        bar.y_axis.title = "руб"
+        bar.style = 10
+        full_cost_idx = EXCEL_HEADERS.index("Полные затраты") + 1
+        revenue_idx = EXCEL_HEADERS.index("Выручка") + 1
+        data_ref = Reference(ws1, min_col=full_cost_idx, max_col=revenue_idx, min_row=header_row1, max_row=last_row1)
+        cats_ref = Reference(ws1, min_col=1, min_row=first_row1, max_row=last_row1)
+        bar.add_data(data_ref, titles_from_data=True)
+        bar.set_categories(cats_ref)
+        bar.series[0].graphicalProperties.solidFill = COLOR_COST
+        bar.series[1].graphicalProperties.solidFill = COLOR_REVENUE
+        bar.height, bar.width = 10, 24
+        ws1.add_chart(bar, f"{get_column_letter(N_COLS_EXCEL + 2)}{header_row1}")
+
+    struct_row0 = total_row1 + 3
+    ws1.cell(row=struct_row0, column=1, value="Структура выручки проекта")
+    ws1.cell(row=struct_row0, column=1).font = TITLE_FONT
+    struct_header_row = struct_row0 + 1
+    ws1.cell(row=struct_header_row, column=1, value="Статья выручки")
+    ws1.cell(row=struct_header_row, column=2, value="Сумма, руб")
+    style_header_row(ws1, struct_header_row, 2)
+
+    if N_ROWS > 0:
+        rng_type = f'${COL["Тип блока"]}${first_row1}:${COL["Тип блока"]}${last_row1}'
+        rng_apt = f'${COL["S квартир, м2"]}${first_row1}:${COL["S квартир, м2"]}${last_row1}'
+        rng_p_apt = f'${COL["Цена жилья, руб/м2"]}${first_row1}:${COL["Цена жилья, руб/м2"]}${last_row1}'
+        rng_c1 = f'${COL["S коммерции 1 эт., м2"]}${first_row1}:${COL["S коммерции 1 эт., м2"]}${last_row1}'
+        rng_p_c1 = f'${COL["Цена коммерции, руб/м2"]}${first_row1}:${COL["Цена коммерции, руб/м2"]}${last_row1}'
+        rng_storage = f'${COL["S кладовых, м2"]}${first_row1}:${COL["S кладовых, м2"]}${last_row1}'
+        rng_p_storage = f'${COL["Цена кладовых, руб/м2"]}${first_row1}:${COL["Цена кладовых, руб/м2"]}${last_row1}'
+        rng_underground = f'${COL["Подземный паркинг, м/м"]}${first_row1}:${COL["Подземный паркинг, м/м"]}${last_row1}'
+        rng_p_underground = f'${COL["Цена подземного м/м, руб"]}${first_row1}:${COL["Цена подземного м/м, руб"]}${last_row1}'
+        rng_ground = f'${COL["Наземный/Многоуровневый паркинг, м/м"]}${first_row1}:${COL["Наземный/Многоуровневый паркинг, м/м"]}${last_row1}'
+        rng_p_ground = f'${COL["Цена наземного м/м, руб"]}${first_row1}:${COL["Цена наземного м/м, руб"]}${last_row1}'
+        struct_formulas = [
+            ("Жилье", f'=SUMPRODUCT(({rng_type}="{TYPE_RESIDENTIAL}")*{rng_apt}*{rng_p_apt})*$B$4'),
+            ("Коммерция", f'=SUMPRODUCT(({rng_type}="{TYPE_RESIDENTIAL}")*{rng_c1}*{rng_p_c1})*$B$4'),
+            ("Кладовые", f'=SUMPRODUCT(({rng_type}="{TYPE_RESIDENTIAL}")*{rng_storage}*{rng_p_storage})*$B$4'),
+            ("Подземные м/м", f'=SUMPRODUCT(({rng_type}="{TYPE_RESIDENTIAL}")*{rng_underground}*{rng_p_underground})*$B$4'),
+            ("Наземные/Многоур. паркинги", f'=SUMPRODUCT(({rng_type}="{TYPE_PARKING}")*{rng_ground}*{rng_p_ground})*$B$4'),
+        ]
+    else:
+        struct_formulas = [(label, 0) for label in revenue_components.keys()]
+
+    for i, (label, formula) in enumerate(struct_formulas):
+        r = struct_header_row + 1 + i
+        c1 = ws1.cell(row=r, column=1, value=label)
+        c2 = ws1.cell(row=r, column=2, value=formula)
+        style_cell(c1)
+        style_cell(c2, number_format=MONEY_FMT)
+    struct_last_row = struct_header_row + len(struct_formulas)
+
+    pie = PieChart()
+    pie.title = "Структура выручки проекта"
+    data_ref = Reference(ws1, min_col=2, min_row=struct_header_row, max_row=struct_last_row)
+    cats_ref = Reference(ws1, min_col=1, min_row=struct_header_row + 1, max_row=struct_last_row)
+    pie.add_data(data_ref, titles_from_data=True)
+    pie.set_categories(cats_ref)
+    pie.dataLabels = DataLabelList()
+    pie.dataLabels.showPercent = True
+    pie.series[0].data_points = [
+        DataPoint(idx=i, spPr=GraphicalProperties(solidFill=PIE_COLORS[i % len(PIE_COLORS)]))
+        for i in range(len(struct_formulas))
+    ]
+    pie.height, pie.width = 10, 16
+    ws1.add_chart(pie, f"{get_column_letter(N_COLS_EXCEL + 2)}{struct_header_row}")
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+excel_bytes = build_excel_report()
+st.divider()
+st.download_button(
+    label="📥 Скачать отчет в Excel (2 листа, живые формулы + графики)",
+    data=excel_bytes,
+    file_name=f"financial_model_{scenario_name}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
