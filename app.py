@@ -145,6 +145,70 @@ DEFAULT_RATES_DF = pd.DataFrame(
      for c, n, g, u, b, r in ITEMS]
 )
 
+# ----------------------------------------------------------------------
+# Наружные работы (код G) и прочие затраты, связанные с СМР (код Z) —
+# ПРОЕКТНЫЙ уровень (считаются на весь проект, а не по блокам), из той
+# же методики. Статьи со статусом "на данный момент не используем" не
+# включены. G.20.20 «Автостоянки» тоже не включена — паркинг уже считается
+# отдельно по блокам (ставки СМР подземного/наземного м/м), включение
+# этой статьи задвоило бы затраты.
+# ----------------------------------------------------------------------
+# Статьи G на площадь участка — количество НЕ вводится по каждой статье отдельно,
+# а берется ОДНО значение площади участка (лист «Исходные данные», ТЭП по мастер-плану).
+ITEMS_G_AREA = [
+    # (код, статья затрат, единица измерения, ставка по умолчанию)
+    ("G.10.10", "Очистка площадки", "площадь участка, га", 250_000),
+    ("G.10.20", "Разборка и вывоз сооружений", "площадь участка, га", 180_000),
+    ("G.10.30", "Земляные работы по подготовке площадки", "площадь участка, га", 650_000),
+    ("G.10.50", "Инженерная подготовка территории", "площадь участка, га", 400_000),
+    ("G.20.10", "Дороги", "площадь участка, га", 3_500_000),
+    ("G.20.40", "МАФ, детские площадки, ограждение", "площадь участка, га", 1_200_000),
+    ("G.20.50", "Озеленение", "площадь участка, га", 900_000),
+    ("G.40.20", "Наружное освещение", "площадь участка, га", 350_000),
+]
+DEFAULT_G_AREA_DF = pd.DataFrame(
+    [{"Код": c, "Статья затрат": n, "Единица измерения": u, "Ставка, руб/ед.": r} for c, n, u, r in ITEMS_G_AREA]
+)
+
+# Статьи G по сетям/кабелям — своей ТЭП-базы (длины) в методике нет, кол-во вводится вручную.
+ITEMS_G_LENGTH = [
+    # (код, статья затрат, единица измерения, кол-во по умолчанию, ставка по умолчанию)
+    ("G.30.10", "Водоснабжение (наружные сети)", "п.м. трубопровода", 600, 18_000),
+    ("G.30.20", "Хоз.быт. канализация (наружные сети)", "п.м. трубопровода", 600, 20_000),
+    ("G.30.30", "Ливневая канализация (наружные сети)", "п.м. трубопровода", 500, 16_000),
+    ("G.30.40", "Сети теплоснабжения", "п.м. трубопровода", 550, 22_000),
+    ("G.30.50", "Сети холодоснабжения", "п.м. трубопровода", 0, 22_000),
+    ("G.30.60", "Топливоснабжение (газ)", "п.м. трубопровода", 0, 15_000),
+    ("G.40.10", "Сети электроснабжения, ТП", "п.м. кабеля", 400, 25_000),
+]
+DEFAULT_G_LENGTH_DF = pd.DataFrame(
+    [{"Код": c, "Статья затрат": n, "Единица измерения": u, "Кол-во": q, "Ставка, руб/ед.": r}
+     for c, n, u, q, r in ITEMS_G_LENGTH]
+)
+
+ITEMS_Z_PCT = [
+    # (код, статья затрат, ставка по умолчанию — доля от (СМР коробки + G))
+    ("Z.10.10", "Услуги генподрядчика", 0.06),
+    ("Z.20.10", "Непредвиденные расходы по объекту", 0.07),
+]
+DEFAULT_Z_PCT_DF = pd.DataFrame(
+    [{"Код": c, "Статья затрат": n, "Ставка, доля от СМР+G": r} for c, n, r in ITEMS_Z_PCT]
+)
+
+ITEMS_Z_FIXED = [
+    # (код, статья затрат, сумма по умолчанию, руб) — по методике формульной базы
+    # нет, сумма берется "по объектам-аналогам" — вводится вручную.
+    ("Z.10.20", "Контроль качества выполнения работ", 15_000_000),
+    ("Z.10.30", "Временные здания и сооружения на площадке", 20_000_000),
+    ("Z.10.40", "Коммунальные услуги на площадке в период строительства", 10_000_000),
+    ("Z.10.50", "Услуги сторонних организаций (межевание, кадастр, ТУ)", 8_000_000),
+    ("Z.10.60", "Проектирование, изыскания, авторский надзор", 45_000_000),
+    ("Z.150", "Технологическое присоединение", 25_000_000),
+]
+DEFAULT_Z_FIXED_DF = pd.DataFrame(
+    [{"Код": c, "Статья затрат": n, "Сумма, руб": s} for c, n, s in ITEMS_Z_FIXED]
+)
+
 
 def get_basis_values(basis_key: str, df: pd.DataFrame, nsa: np.ndarray) -> np.ndarray:
     """Возвращает массив значений базы расчета (площадь/объем/шт) по каждой строке блоков."""
@@ -155,6 +219,27 @@ def get_basis_values(basis_key: str, df: pd.DataFrame, nsa: np.ndarray) -> np.nd
     if basis_key == "STORAGE_AREA":
         return df["S кладовых, м2"].to_numpy(dtype=float)
     return df[BASIS_COLUMN[basis_key]].to_numpy(dtype=float)
+
+
+# ----------------------------------------------------------------------
+# Лист «Исходные данные (ТЭП)» — из методики, отдельный лист «Перечень ТЭП
+# для МП и ЭП». Включены ТОЛЬКО числовые поля, которые реально участвуют
+# в расчете (остальные пункты методики текстовые/описательные — тип
+# вентиляции, СТУ и т.п. — и в модели не используются).
+# Поля ЭП (по каждому жилому блоку) передаются в соответствующие колонки
+# таблицы блоков — там они становятся нередактируемыми.
+# ----------------------------------------------------------------------
+TEP_TO_MAIN_COL = {
+    "Кол-во секций, шт": "Кол-во подъездов, шт",
+    "Кол-во квартир, шт": "Кол-во квартир, шт",
+    "Общая площадь квартир (с летними, с коэф.), м2": "S квартир, м2",
+    "Площадь коммерции, м2": "S коммерции 1 эт., м2",
+    "Площадь застройки, м2": "Площадь застройки, м2",
+    "Площадь кладовых в доме, м2": "S кладовых, м2",
+    "Площадь остекления окон, м2": "Площадь остекления окон, м2",
+    "Кол-во лифтов, шт": "Кол-во лифтов, шт",
+}
+TEP_COLS = list(TEP_TO_MAIN_COL.keys())
 
 
 # ======================================================================
@@ -251,24 +336,44 @@ with st.sidebar:
     cost_factor = SCENARIOS[scenario_name]["cost"]
 
     st.header("Пул косвенных расходов проекта, руб")
-    st.caption("Земля/сети/благоустройство/социалка — распределяется ТОЛЬКО на «Жилые блоки» пропорц. NSA")
+    st.caption(
+        "Земля/сети/благоустройство/социалка/soft costs — распределяется ТОЛЬКО на «Жилые "
+        "блоки» пропорц. NSA. Наружные работы (G) и прочие затраты по СМР (Z) считаются "
+        "детально на вкладке «СМР по методике» и добавляются к этому пулу автоматически — "
+        "если поля «Сети» и «Благоустройство» ниже уже их учитывают, скорректируйте суммы, "
+        "чтобы не задвоить."
+    )
     cost_land = st.number_input("Земля", min_value=0.0, value=500_000_000.0, step=1_000_000.0)
     cost_infra = st.number_input("Сети / Инфраструктура", min_value=0.0, value=300_000_000.0, step=1_000_000.0)
     cost_landscape = st.number_input("Благоустройство / Дороги", min_value=0.0, value=150_000_000.0, step=1_000_000.0)
     cost_social = st.number_input("Социальные объекты (школы/сады)", min_value=0.0, value=400_000_000.0, step=1_000_000.0)
     cost_soft = st.number_input("Прочие Soft Costs", min_value=0.0, value=100_000_000.0, step=1_000_000.0)
-    indirect_pool_total = cost_land + cost_infra + cost_landscape + cost_social + cost_soft
-    st.caption(f"Итого пул косвенных расходов: {indirect_pool_total:,.0f} руб".replace(",", " "))
+    indirect_pool_sidebar = cost_land + cost_infra + cost_landscape + cost_social + cost_soft
+    st.caption(f"Итого по этим статьям: {indirect_pool_sidebar:,.0f} руб (без G/Z)".replace(",", " "))
 
 # ======================================================================
 # 6. ЕДИНАЯ ТАБЛИЦА ТЭП + КАТАЛОГ РАСЦЕНОК (session_state)
 # ======================================================================
 if "blocks_df" not in st.session_state:
     st.session_state.blocks_df = generate_default_table()
-if "rates_df" not in st.session_state:
-    st.session_state.rates_df = DEFAULT_RATES_DF.copy()
+if "block_rates" not in st.session_state:
+    st.session_state.block_rates = {}  # имя жилого блока -> DataFrame ставок (32 статьи)
+if "g_area_df" not in st.session_state:
+    st.session_state.g_area_df = DEFAULT_G_AREA_DF.copy()
+if "g_length_df" not in st.session_state:
+    st.session_state.g_length_df = DEFAULT_G_LENGTH_DF.copy()
+if "z_pct_df" not in st.session_state:
+    st.session_state.z_pct_df = DEFAULT_Z_PCT_DF.copy()
+if "z_fixed_df" not in st.session_state:
+    st.session_state.z_fixed_df = DEFAULT_Z_FIXED_DF.copy()
+if "site_area_ga" not in st.session_state:
+    st.session_state.site_area_ga = 3.5
+if "tep_store" not in st.session_state:
+    st.session_state.tep_store = {}  # имя жилого блока -> {поле ТЭП: значение}
 
-tab_main, tab_smr = st.tabs(["📊 Финансовая модель", "🏗️ СМР по методике"])
+tab_main, tab_smr, tab_tep = st.tabs(
+    ["📊 Финансовая модель", "🏗️ СМР по методике", "📋 Исходные данные (ТЭП)"]
+)
 
 # ------------------------------------------------------------------
 # ВКЛАДКА 1: основная таблица ТЭП
@@ -277,15 +382,20 @@ with tab_main:
     st.subheader("ТЭП проекта (жилые блоки и блоки-паркинги в одной таблице)")
     st.caption(
         "Себестоимость коробки жилого блока считается на вкладке «СМР по методике» — "
-        "здесь задаются площади, цены и доп. параметры для этого расчета."
+        "здесь задаются площади, цены и доп. параметры для этого расчета. Колонки, "
+        "выделенные на вкладке «Исходные данные» (кол-во квартир, площади и т.п.), "
+        "вводятся там и здесь не редактируются."
     )
 
+    tep_linked_cols = set(TEP_TO_MAIN_COL.values())
     column_config = {
         "Название блока": st.column_config.TextColumn(required=True),
         "Тип блока": st.column_config.SelectboxColumn(options=BLOCK_TYPES, required=True),
     }
     for col in NUMERIC_COLS:
-        column_config[col] = st.column_config.NumberColumn(min_value=0, format="%.0f")
+        column_config[col] = st.column_config.NumberColumn(
+            min_value=0, format="%.0f", disabled=(col in tep_linked_cols)
+        )
 
     edited = st.data_editor(
         st.session_state.blocks_df,
@@ -308,47 +418,128 @@ N_ROWS = len(blocks)
 is_res = (blocks["Тип блока"] == TYPE_RESIDENTIAL)
 is_park = (blocks["Тип блока"] == TYPE_PARKING)
 
+# ------------------------------------------------------------------
+# ВКЛАДКА 3: исходные данные (ТЭП) по методике — источник для части
+# параметров жилых блоков (кол-во квартир, площади и т.п., ЭП) и площади
+# участка проекта (МП), которая используется в разделе «Наружные работы» (G).
+# ------------------------------------------------------------------
+res_block_names = list(blocks.loc[is_res, "Название блока"])
+st.session_state.tep_store = {k: v for k, v in st.session_state.tep_store.items() if k in res_block_names}
+for _i, _name in enumerate(blocks["Название блока"]):
+    if is_res[_i] and _name not in st.session_state.tep_store:
+        st.session_state.tep_store[_name] = {
+            tep_col: float(blocks.at[_i, main_col]) for tep_col, main_col in TEP_TO_MAIN_COL.items()
+        }
+
+with tab_tep:
+    st.subheader("Исходные данные по мастер-плану (МП)")
+    st.caption(
+        "Площадь участка — единая на проект. Используется в расчете раздела «Наружные "
+        "работы» (G) на вкладке «СМР по методике»."
+    )
+    st.session_state.site_area_ga = st.number_input(
+        "Площадь участка, га", min_value=0.0, value=float(st.session_state.site_area_ga), step=0.1,
+    )
+
+    st.subheader("Исходные данные по эскизному проекту (ЭП) — по каждому жилому блоку")
+    st.caption(
+        "Значения передаются в таблицу блоков на вкладке «Финансовая модель» (там эти "
+        "колонки нередактируемые) и используются в расчете себестоимости коробки. Остальные "
+        "параметры блока (цены, паркинг, объемы, фасад, лоджии) по-прежнему задаются на "
+        "вкладке «Финансовая модель»."
+    )
+    if res_block_names:
+        tep_df_view = pd.DataFrame(
+            [{"Название блока": name, **st.session_state.tep_store[name]} for name in res_block_names]
+        )
+        tep_column_config = {"Название блока": st.column_config.TextColumn(disabled=True)}
+        for _col in TEP_COLS:
+            tep_column_config[_col] = st.column_config.NumberColumn(min_value=0, format="%.0f")
+        tep_edited = st.data_editor(
+            tep_df_view,
+            use_container_width=True,
+            num_rows="fixed",
+            key="tep_editor",
+            column_config=tep_column_config,
+        )
+        for _, _row in tep_edited.iterrows():
+            st.session_state.tep_store[_row["Название блока"]] = {
+                col: float(pd.to_numeric(_row[col], errors="coerce") or 0.0) for col in TEP_COLS
+            }
+    else:
+        st.info("Добавьте хотя бы один «Жилой блок» на вкладке «Финансовая модель», чтобы ввести данные ЭП.")
+
+# Данные ЭП — источник истины для соответствующих колонок таблицы блоков
+for _i, _name in enumerate(blocks["Название блока"]):
+    if is_res[_i] and _name in st.session_state.tep_store:
+        for tep_col, main_col in TEP_TO_MAIN_COL.items():
+            blocks.at[_i, main_col] = st.session_state.tep_store[_name][tep_col]
+st.session_state.blocks_df = blocks[ALL_COLS].copy()
+
 # NSA нужна и для аллокации, и как база нескольких статей методики
 nsa = np.where(is_res, blocks["S квартир, м2"] + blocks["S коммерции 1 эт., м2"] + blocks["S кладовых, м2"], 0.0)
 blocks["NSA, м2"] = nsa
 
 # ------------------------------------------------------------------
-# ВКЛАДКА 2: каталог расценок + расчет себестоимости коробки по методике
+# ВКЛАДКА 2: каталог расценок (ИНДИВИДУАЛЬНО по каждому жилому блоку) +
+# расчет себестоимости коробки по методике
 # ------------------------------------------------------------------
+item_codes_master = list(DEFAULT_RATES_DF["Код"])
+code_to_basis = dict(zip(DEFAULT_RATES_DF["Код"], DEFAULT_RATES_DF["_basis"]))
+code_to_group = dict(zip(DEFAULT_RATES_DF["Код"], DEFAULT_RATES_DF["Группа"]))
+code_to_name = dict(zip(DEFAULT_RATES_DF["Код"], DEFAULT_RATES_DF["Статья затрат"]))
+
+# res_block_names уже посчитан выше (синхронизация с вкладкой «Исходные данные»).
+# Убираем ставки блоков, которых больше нет в таблице (удалены/переименованы),
+# и заводим ставки по умолчанию для новых блоков.
+st.session_state.block_rates = {k: v for k, v in st.session_state.block_rates.items() if k in res_block_names}
+for _name in res_block_names:
+    if _name not in st.session_state.block_rates:
+        st.session_state.block_rates[_name] = DEFAULT_RATES_DF.copy()
+
 with tab_smr:
-    st.subheader("Каталог расценок по видам работ (действующая методика)")
+    st.subheader("Ставки СМР по видам работ — индивидуально по каждому урбан-блоку")
     st.caption(
-        "Ставки задаются один раз на проект (по объекту-аналогу) и применяются ко всем жилым блокам. "
-        "Код и база расчета фиксированы методикой — редактируется только ставка."
+        "У каждого жилого блока может быть своя себестоимость коробки — выберите блок и при "
+        "необходимости скорректируйте его ставки. Код, группа, единица и база расчета едины "
+        "по методике, редактируется только ставка. Новый блок получает ставки по умолчанию. "
+        "Названия блоков должны быть уникальны, иначе ставки будут общими на все блоки с "
+        "одинаковым названием."
     )
-    rates_edited = st.data_editor(
-        st.session_state.rates_df,
-        use_container_width=True,
-        num_rows="fixed",
-        key="rates_editor",
-        column_config={
-            "Код": st.column_config.TextColumn(disabled=True),
-            "Статья затрат": st.column_config.TextColumn(disabled=True),
-            "Группа": st.column_config.TextColumn(disabled=True),
-            "Единица измерения": st.column_config.TextColumn(disabled=True),
-            "_basis": None,  # служебная колонка — скрыта
-            "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%.0f"),
-        },
-    )
-    st.session_state.rates_df = rates_edited
+    if res_block_names:
+        selected_block = st.selectbox("Урбан-блок", res_block_names, key="smr_block_selector")
+        block_rates_edited = st.data_editor(
+            st.session_state.block_rates[selected_block],
+            use_container_width=True,
+            num_rows="fixed",
+            key=f"rates_editor_{selected_block}",
+            column_config={
+                "Код": st.column_config.TextColumn(disabled=True),
+                "Статья затрат": st.column_config.TextColumn(disabled=True),
+                "Группа": st.column_config.TextColumn(disabled=True),
+                "Единица измерения": st.column_config.TextColumn(disabled=True),
+                "_basis": None,  # служебная колонка — скрыта
+                "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%.0f"),
+            },
+        )
+        st.session_state.block_rates[selected_block] = block_rates_edited
+    else:
+        st.info("Добавьте хотя бы один «Жилой блок» на вкладке «Финансовая модель», чтобы задать ставки СМР.")
 
-rates_df = st.session_state.rates_df.copy()
-rates_df["Ставка, руб/ед."] = pd.to_numeric(rates_df["Ставка, руб/ед."], errors="coerce").fillna(0.0)
+# -- Расчет себестоимости коробки по методике: у КАЖДОГО блока — свой каталог ставок --
+qty_by_basis = {b: get_basis_values(b, blocks, nsa) for b in set(code_to_basis.values())}
 
-# -- Расчет себестоимости коробки по методике: матрица (блок x статья) --
-item_cost_matrix = {}  # код статьи -> np.array стоимости по блокам (только жилые, иначе 0)
-for _, item_row in rates_df.iterrows():
-    code = item_row["Код"]
-    basis_key = item_row["_basis"]
-    rate = item_row["Ставка, руб/ед."]
-    qty = get_basis_values(basis_key, blocks, nsa)
-    cost = np.where(is_res, qty * rate, 0.0)
-    item_cost_matrix[code] = cost
+item_cost_matrix = {code: np.zeros(N_ROWS) for code in item_codes_master}  # код -> np.array по блокам
+block_rate_series = {}  # имя блока -> Series(код -> ставка) — для итогов/детализации
+for i in range(N_ROWS):
+    if not is_res[i]:
+        continue
+    name = blocks["Название блока"].iloc[i]
+    block_df = st.session_state.block_rates.get(name, DEFAULT_RATES_DF)
+    rate_series = pd.to_numeric(block_df.set_index("Код")["Ставка, руб/ед."], errors="coerce").fillna(0.0)
+    block_rate_series[name] = rate_series
+    for code in item_codes_master:
+        item_cost_matrix[code][i] = qty_by_basis[code_to_basis[code]][i] * rate_series.get(code, 0.0)
 
 smr_korobka_raw = np.sum(list(item_cost_matrix.values()), axis=0) if item_cost_matrix and N_ROWS > 0 else np.zeros(N_ROWS)
 blocks["Себестоимость коробки (методика)"] = smr_korobka_raw
@@ -382,9 +573,9 @@ with tab_smr:
 
     with smr_chart_col2:
         group_totals = {}
-        for _, item_row in rates_df.iterrows():
-            g = GROUP_LABELS[item_row["Группа"]]
-            group_totals[g] = group_totals.get(g, 0.0) + item_cost_matrix[item_row["Код"]].sum()
+        for code in item_codes_master:
+            g = GROUP_LABELS[code_to_group[code]]
+            group_totals[g] = group_totals.get(g, 0.0) + item_cost_matrix[code].sum()
         fig_group_pie = go.Figure(
             go.Pie(
                 labels=list(group_totals.keys()), values=list(group_totals.values()),
@@ -396,12 +587,132 @@ with tab_smr:
 
     with st.expander("Детализация по каждой статье и блоку"):
         detail_df = pd.DataFrame(item_cost_matrix, index=blocks["Название блока"]).T
-        detail_df.insert(0, "Статья затрат", rates_df.set_index("Код")["Статья затрат"].reindex(detail_df.index).values)
+        detail_df.insert(0, "Статья затрат", [code_to_name[c] for c in detail_df.index])
         st.dataframe(detail_df, use_container_width=True)
+
+# ------------------------------------------------------------------
+# ВКЛАДКА 2 (продолжение): наружные работы (G) и прочие затраты, связанные
+# с СМР (Z) — считаются на весь проект, не по блокам, из той же методики.
+# ------------------------------------------------------------------
+with tab_smr:
+    st.divider()
+    st.subheader("Наружные работы (код G, на весь проект)")
+    st.caption(
+        f"Статьи на площадь участка считаются от {st.session_state.site_area_ga:.1f} га "
+        "(вкладка «Исходные данные», МП) — кол-во там не редактируется, только ставка. "
+        "Автостоянки (G.20.20) не включены — паркинг уже учтен по блокам."
+    )
+    g_area_edited = st.data_editor(
+        st.session_state.g_area_df,
+        use_container_width=True,
+        num_rows="fixed",
+        key="g_area_editor",
+        column_config={
+            "Код": st.column_config.TextColumn(disabled=True),
+            "Статья затрат": st.column_config.TextColumn(disabled=True),
+            "Единица измерения": st.column_config.TextColumn(disabled=True),
+            "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%.0f"),
+        },
+    )
+    st.session_state.g_area_df = g_area_edited
+
+g_area_df = st.session_state.g_area_df.copy()
+g_area_df["Ставка, руб/ед."] = pd.to_numeric(g_area_df["Ставка, руб/ед."], errors="coerce").fillna(0.0)
+g_area_df["Кол-во"] = float(st.session_state.site_area_ga)
+g_area_df["Сумма, руб"] = g_area_df["Кол-во"] * g_area_df["Ставка, руб/ед."]
+
+with tab_smr:
+    st.dataframe(
+        g_area_df[["Код", "Статья затрат", "Сумма, руб"]], use_container_width=True,
+        column_config={"Сумма, руб": st.column_config.NumberColumn(format="%.0f")},
+    )
+    st.markdown("**Сети и кабели (своей ТЭП-базы нет — кол-во вводится вручную)**")
+    g_length_edited = st.data_editor(
+        st.session_state.g_length_df,
+        use_container_width=True,
+        num_rows="fixed",
+        key="g_length_editor",
+        column_config={
+            "Код": st.column_config.TextColumn(disabled=True),
+            "Статья затрат": st.column_config.TextColumn(disabled=True),
+            "Единица измерения": st.column_config.TextColumn(disabled=True),
+            "Кол-во": st.column_config.NumberColumn(min_value=0, format="%.1f"),
+            "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%.0f"),
+        },
+    )
+    st.session_state.g_length_df = g_length_edited
+
+g_length_df = st.session_state.g_length_df.copy()
+g_length_df["Кол-во"] = pd.to_numeric(g_length_df["Кол-во"], errors="coerce").fillna(0.0)
+g_length_df["Ставка, руб/ед."] = pd.to_numeric(g_length_df["Ставка, руб/ед."], errors="coerce").fillna(0.0)
+g_length_df["Сумма, руб"] = g_length_df["Кол-во"] * g_length_df["Ставка, руб/ед."]
+
+g_total = float(g_area_df["Сумма, руб"].sum()) + float(g_length_df["Сумма, руб"].sum())
+
+with tab_smr:
+    st.metric("Итого наружные работы (G)", f"{g_total:,.0f} руб".replace(",", " "))
+
+    st.subheader("Прочие затраты, связанные с СМР (код Z, на весь проект)")
+    st.caption(
+        "Часть статей считается как % от себестоимости СМР (коробка по блокам + наружные "
+        "работы G). Остальные статьи по методике не имеют формульной базы — сумма берется "
+        "«по объектам-аналогам» и вводится напрямую."
+    )
+
+z_pct_base = float(smr_korobka_raw.sum()) + g_total
+
+with tab_smr:
+    st.caption(f"База для % статей (СМР коробки + G): {z_pct_base:,.0f} руб".replace(",", " "))
+    z_pct_edited = st.data_editor(
+        st.session_state.z_pct_df,
+        use_container_width=True,
+        num_rows="fixed",
+        key="z_pct_editor",
+        column_config={
+            "Код": st.column_config.TextColumn(disabled=True),
+            "Статья затрат": st.column_config.TextColumn(disabled=True),
+            "Ставка, доля от СМР+G": st.column_config.NumberColumn(min_value=0, max_value=1, format="%.3f"),
+        },
+    )
+    st.session_state.z_pct_df = z_pct_edited
+
+z_pct_df = st.session_state.z_pct_df.copy()
+z_pct_df["Ставка, доля от СМР+G"] = pd.to_numeric(z_pct_df["Ставка, доля от СМР+G"], errors="coerce").fillna(0.0)
+z_pct_df["Сумма, руб"] = z_pct_base * z_pct_df["Ставка, доля от СМР+G"]
+
+with tab_smr:
+    st.markdown("**Статьи с прямым вводом суммы (нет формульной базы по методике)**")
+    z_fixed_edited = st.data_editor(
+        st.session_state.z_fixed_df,
+        use_container_width=True,
+        num_rows="fixed",
+        key="z_fixed_editor",
+        column_config={
+            "Код": st.column_config.TextColumn(disabled=True),
+            "Статья затрат": st.column_config.TextColumn(disabled=True),
+            "Сумма, руб": st.column_config.NumberColumn(min_value=0, format="%.0f"),
+        },
+    )
+    st.session_state.z_fixed_df = z_fixed_edited
+
+z_fixed_df = st.session_state.z_fixed_df.copy()
+z_fixed_df["Сумма, руб"] = pd.to_numeric(z_fixed_df["Сумма, руб"], errors="coerce").fillna(0.0)
+
+z_total = float(z_pct_df["Сумма, руб"].sum()) + float(z_fixed_df["Сумма, руб"].sum())
+
+with tab_smr:
+    st.metric("Итого прочие затраты, связанные с СМР (Z)", f"{z_total:,.0f} руб".replace(",", " "))
+    st.caption(
+        f"Итого G + Z: {(g_total + z_total):,.0f} руб — автоматически добавляется в пул "
+        "косвенных расходов проекта (сайдбар) и распределяется на жилые блоки пропорц. NSA."
+        .replace(",", " ")
+    )
 
 # ======================================================================
 # 7. РАСЧЕТ ЭКОНОМИКИ (единая логика на всю таблицу, ветвление по типу)
 # ======================================================================
+indirect_pool_total = indirect_pool_sidebar + g_total + z_total
+
 total_nsa = nsa.sum()
 share = np.zeros_like(nsa, dtype=float)
 if total_nsa > 0:
@@ -613,9 +924,9 @@ def build_excel_report() -> bytes:
     ws1["E4"] = cost_factor
     ws1["D4"].font = PARAM_FONT
     ws1["G4"] = "Пул косвенных расходов, руб (база):"
-    ws1["H4"] = indirect_pool_total
-    ws1["H4"].number_format = MONEY_FMT
     ws1["G4"].font = PARAM_FONT
+    # H4 заполняется формулой ниже, после того как на Листе 2 посчитаны
+    # ИТОГО G и ИТОГО Z (пул = сайдбар-статьи + G + Z, живая ссылка на Лист 2).
 
     header_row1 = 6
     first_row1 = header_row1 + 1
@@ -623,297 +934,4 @@ def build_excel_report() -> bytes:
 
     for j, h in enumerate(EXCEL_HEADERS, start=1):
         ws1.cell(row=header_row1, column=j, value=h)
-    style_header_row(ws1, header_row1, N_COLS_EXCEL)
-
-    # ------------------------------------------------------------------
-    # Лист 2: каталог расценок + расчет себестоимости коробки по блокам
-    # (строится ПЕРЕД заполнением листа 1, т.к. лист 1 на него ссылается)
-    # ------------------------------------------------------------------
-    ws2 = wb.create_sheet(SHEET2_NAME)
-    ws2["A1"] = "Расчет СМР по укрупненным видам работ (действующая методика)"
-    ws2["A1"].font = TITLE_FONT
-    ws2["A2"] = f"Проект: {project_name} | Сценарий: {scenario_name}"
-
-    ws2["A4"] = "Каталог расценок (редактируется только ставка)"
-    ws2["A4"].font = PARAM_FONT
-    rates_header_row = 5
-    for j, h in enumerate(["Код", "Статья затрат", "Группа", "Единица измерения", "Ставка, руб/ед."], start=1):
-        ws2.cell(row=rates_header_row, column=j, value=h)
-    style_header_row(ws2, rates_header_row, 5)
-
-    rates_first_row = rates_header_row + 1
-    rate_row_by_code = {}
-    for i, item_row in rates_df.iterrows():
-        r = rates_first_row + i
-        rate_row_by_code[item_row["Код"]] = r
-        vals = [item_row["Код"], item_row["Статья затрат"], item_row["Группа"], item_row["Единица измерения"], item_row["Ставка, руб/ед."]]
-        for j, v in enumerate(vals, start=1):
-            cell = ws2.cell(row=r, column=j, value=v)
-            style_cell(cell, number_format=(MONEY_FMT if j == 5 else None))
-    rates_last_row = rates_first_row + len(rates_df) - 1
-
-    # -- Расчет по блокам: строки = блоки (в том же порядке, что на листе 1) --
-    calc_title_row = rates_last_row + 3
-    ws2.cell(row=calc_title_row, column=1, value="Себестоимость коробки по блокам (только «Жилой блок»)")
-    ws2.cell(row=calc_title_row, column=1).font = PARAM_FONT
-    calc_header_row = calc_title_row + 1
-    item_codes = list(rates_df["Код"])
-    calc_headers2 = ["Название блока", "Тип блока"] + item_codes + ["ИТОГО СМР коробки, руб"]
-    for j, h in enumerate(calc_headers2, start=1):
-        ws2.cell(row=calc_header_row, column=j, value=h)
-    style_header_row(ws2, calc_header_row, len(calc_headers2))
-
-    calc_first_row = calc_header_row + 1
-    total_col_idx2 = len(calc_headers2)  # последняя колонка — ИТОГО
-    for i, (_, row) in enumerate(blocks.iterrows()):
-        r2 = calc_first_row + i
-        r1 = first_row1 + i  # соответствующая строка на листе 1 (тот же порядок блоков)
-        ws2.cell(row=r2, column=1, value=row["Название блока"])
-        ws2.cell(row=r2, column=2, value=row["Тип блока"])
-        style_cell(ws2.cell(row=r2, column=1))
-        style_cell(ws2.cell(row=r2, column=2))
-
-        type_ref = f"'{SHEET1_NAME}'!{COL['Тип блока']}{r1}"
-        for k, item_row in rates_df.iterrows():
-            code = item_row["Код"]
-            basis_key = item_row["_basis"]
-            rr = rate_row_by_code[code]
-            rate_ref = f"$E${rr}"
-            if basis_key == "NSA":
-                qty_ref = f"'{SHEET1_NAME}'!{COL['NSA, м2']}{r1}"
-            elif basis_key == "VOL_TOTAL":
-                qty_ref = f"('{SHEET1_NAME}'!{COL['Объем здания ниже 0, м3']}{r1}+'{SHEET1_NAME}'!{COL['Объем здания выше 0, м3']}{r1})"
-            elif basis_key == "STORAGE_AREA":
-                qty_ref = f"'{SHEET1_NAME}'!{COL['S кладовых, м2']}{r1}"
-            else:
-                basis_col_name = BASIS_COLUMN[basis_key]
-                qty_ref = f"'{SHEET1_NAME}'!{COL[basis_col_name]}{r1}"
-            formula = f'=IF({type_ref}="{TYPE_RESIDENTIAL}",{qty_ref}*{rate_ref},0)'
-            cell = ws2.cell(row=r2, column=3 + k, value=formula)
-            style_cell(cell, number_format=MONEY_FMT)
-
-        first_item_col = get_column_letter(3)
-        last_item_col = get_column_letter(2 + len(item_codes))
-        total_cell = ws2.cell(row=r2, column=total_col_idx2, value=f"=SUM({first_item_col}{r2}:{last_item_col}{r2})")
-        style_cell(total_cell, number_format=MONEY_FMT, bold=True, fill=TOTAL_FILL)
-    calc_last_row = calc_first_row + N_ROWS - 1
-
-    autosize(ws2, len(calc_headers2), width=13)
-    ws2.column_dimensions["A"].width = 16
-    ws2.column_dimensions["B"].width = 24
-
-    # -- Группы работ (для круговой диаграммы) — суммы по прямоугольным
-    #    диапазонам колонок статей внутри каждой группы (колонки статей
-    #    идут подряд, сгруппированы по буквенному коду) --
-    group_order, group_col_ranges = [], {}
-    start_idx = None
-    prev_group = None
-    for k, item_row in rates_df.iterrows():
-        g = item_row["Группа"]
-        col_idx = 3 + k
-        if g != prev_group:
-            if prev_group is not None:
-                group_col_ranges[prev_group] = (group_col_ranges[prev_group][0], col_idx - 1)
-            group_col_ranges[g] = (col_idx, col_idx)
-            group_order.append(g)
-            prev_group = g
-        else:
-            group_col_ranges[g] = (group_col_ranges[g][0], col_idx)
-
-    group_table_row0 = calc_last_row + 3
-    ws2.cell(row=group_table_row0, column=1, value="Структура СМР коробки по группам работ")
-    ws2.cell(row=group_table_row0, column=1).font = PARAM_FONT
-    group_header_row = group_table_row0 + 1
-    ws2.cell(row=group_header_row, column=1, value="Группа")
-    ws2.cell(row=group_header_row, column=2, value="Сумма, руб")
-    style_header_row(ws2, group_header_row, 2)
-    for gi, g in enumerate(group_order):
-        r = group_header_row + 1 + gi
-        c1, c2 = group_col_ranges[g]
-        col1_letter, col2_letter = get_column_letter(c1), get_column_letter(c2)
-        label_cell = ws2.cell(row=r, column=1, value=GROUP_LABELS[g])
-        sum_cell = ws2.cell(
-            row=r, column=2,
-            value=f"=SUM({col1_letter}{calc_first_row}:{col2_letter}{calc_last_row})" if N_ROWS > 0 else 0,
-        )
-        style_cell(label_cell)
-        style_cell(sum_cell, number_format=MONEY_FMT)
-    group_last_row = group_header_row + len(group_order)
-
-    # -- Встроенные графики Листа 2 --
-    if N_ROWS > 0:
-        bar2 = BarChart()
-        bar2.type = "col"
-        bar2.title = "Себестоимость коробки по блокам (методика)"
-        bar2.y_axis.title = "руб"
-        bar2.style = 10
-        data_ref2 = Reference(ws2, min_col=total_col_idx2, max_col=total_col_idx2, min_row=calc_header_row, max_row=calc_last_row)
-        cats_ref2 = Reference(ws2, min_col=1, min_row=calc_first_row, max_row=calc_last_row)
-        bar2.add_data(data_ref2, titles_from_data=True)
-        bar2.set_categories(cats_ref2)
-        bar2.series[0].graphicalProperties.solidFill = COLOR_DIRECT_COST
-        bar2.height, bar2.width = 10, 22
-        ws2.add_chart(bar2, f"{get_column_letter(total_col_idx2 + 2)}{calc_header_row}")
-
-        pie2 = PieChart()
-        pie2.title = "Структура СМР коробки по группам работ"
-        data_ref_g = Reference(ws2, min_col=2, min_row=group_header_row, max_row=group_last_row)
-        cats_ref_g = Reference(ws2, min_col=1, min_row=group_header_row + 1, max_row=group_last_row)
-        pie2.add_data(data_ref_g, titles_from_data=True)
-        pie2.set_categories(cats_ref_g)
-        pie2.dataLabels = DataLabelList()
-        pie2.dataLabels.showPercent = True
-        pie2.series[0].data_points = [
-            DataPoint(idx=i, spPr=GraphicalProperties(solidFill=GROUP_COLORS[i % len(GROUP_COLORS)]))
-            for i in range(len(group_order))
-        ]
-        pie2.height, pie2.width = 10, 14
-        ws2.add_chart(pie2, f"{get_column_letter(total_col_idx2 + 2)}{calc_header_row + 22}")
-
-    # ------------------------------------------------------------------
-    # Возвращаемся к листу 1: входные данные + формулы (ссылаются на лист 2)
-    # ------------------------------------------------------------------
-    for i, (_, row) in enumerate(blocks.iterrows()):
-        r1 = first_row1 + i
-        input_values = [row[h] for h in EXCEL_INPUT_HEADERS]
-        for j, v in enumerate(input_values, start=1):
-            cell = ws1.cell(row=r1, column=j, value=v)
-            style_cell(cell, number_format=(MONEY_FMT if j >= 3 else None))
-
-        r2 = calc_first_row + i
-        c = COL
-        f_nsa = f'=IF({c["Тип блока"]}{r1}="{TYPE_RESIDENTIAL}",{c["S квартир, м2"]}{r1}+{c["S коммерции 1 эт., м2"]}{r1}+{c["S кладовых, м2"]}{r1},0)'
-        f_share = f'=IF(SUM(${c["NSA, м2"]}${first_row1}:${c["NSA, м2"]}${last_row1})=0,0,{c["NSA, м2"]}{r1}/SUM(${c["NSA, м2"]}${first_row1}:${c["NSA, м2"]}${last_row1}))'
-        f_alloc = f'={c["Доля аллокации"]}{r1}*$H$4*$E$4'
-        f_korobka = f"='{SHEET2_NAME}'!{get_column_letter(total_col_idx2)}{r2}"
-        f_direct = (
-            f'=IF({c["Тип блока"]}{r1}="{TYPE_RESIDENTIAL}",'
-            f'({c["Себестоимость коробки (методика)"]}{r1}+{c["Подземный паркинг, м/м"]}{r1}*{c["Ставка СМР подземного м/м, руб"]}{r1})*$E$4,'
-            f'{c["Наземный/Многоуровневый паркинг, м/м"]}{r1}*{c["Ставка СМР наземного м/м, руб"]}{r1}*$E$4)'
-        )
-        f_full = f'={c["Аллоцированные затраты"]}{r1}+{c["Прямые затраты"]}{r1}'
-        f_revenue = (
-            f'=IF({c["Тип блока"]}{r1}="{TYPE_RESIDENTIAL}",'
-            f'({c["S квартир, м2"]}{r1}*{c["Цена жилья, руб/м2"]}{r1}'
-            f'+{c["S коммерции 1 эт., м2"]}{r1}*{c["Цена коммерции, руб/м2"]}{r1}'
-            f'+{c["S кладовых, м2"]}{r1}*{c["Цена кладовых, руб/м2"]}{r1}'
-            f'+{c["Подземный паркинг, м/м"]}{r1}*{c["Цена подземного м/м, руб"]}{r1})*$B$4,'
-            f'{c["Наземный/Многоуровневый паркинг, м/м"]}{r1}*{c["Цена наземного м/м, руб"]}{r1}*$B$4)'
-        )
-        f_profit = f'={c["Выручка"]}{r1}-{c["Полные затраты"]}{r1}'
-        f_margin = f'=IF({c["Выручка"]}{r1}=0,0,{c["Валовая прибыль"]}{r1}/{c["Выручка"]}{r1})'
-
-        calc_formulas = [f_nsa, f_share, f_alloc, f_korobka, f_direct, f_full, f_revenue, f_profit, f_margin]
-        for k, formula in enumerate(calc_formulas):
-            col_idx = len(EXCEL_INPUT_HEADERS) + 1 + k
-            cell = ws1.cell(row=r1, column=col_idx, value=formula)
-            header_name = EXCEL_CALC_HEADERS[k]
-            fmt = PERCENT_FMT if header_name in ("Доля аллокации", "Рентабельность") else MONEY_FMT
-            style_cell(cell, number_format=fmt)
-
-    total_row1 = last_row1 + 1 if N_ROWS > 0 else first_row1
-    ws1.cell(row=total_row1, column=1, value="ИТОГО")
-    if N_ROWS > 0:
-        for header_name in ["NSA, м2", "Доля аллокации", "Аллоцированные затраты", "Себестоимость коробки (методика)",
-                             "Прямые затраты", "Полные затраты", "Выручка", "Валовая прибыль"]:
-            col_letter = COL[header_name]
-            ws1[f"{col_letter}{total_row1}"] = f"=SUM({col_letter}{first_row1}:{col_letter}{last_row1})"
-        ws1[f'{COL["Рентабельность"]}{total_row1}'] = (
-            f'=IF({COL["Выручка"]}{total_row1}=0,0,{COL["Валовая прибыль"]}{total_row1}/{COL["Выручка"]}{total_row1})'
-        )
-    else:
-        for header_name in EXCEL_CALC_HEADERS:
-            ws1[f"{COL[header_name]}{total_row1}"] = 0
-    for j in range(1, N_COLS_EXCEL + 1):
-        cell = ws1.cell(row=total_row1, column=j)
-        header_name = EXCEL_HEADERS[j - 1]
-        fmt = PERCENT_FMT if header_name in ("Доля аллокации", "Рентабельность") else (MONEY_FMT if j >= 3 else None)
-        style_cell(cell, number_format=fmt, bold=True, fill=TOTAL_FILL)
-
-    autosize(ws1, N_COLS_EXCEL, width=14)
-    ws1.column_dimensions["A"].width = 16
-    ws1.column_dimensions["B"].width = 26
-
-    if N_ROWS > 0:
-        bar = BarChart()
-        bar.type = "col"
-        bar.title = "Выручка vs Полные затраты по блокам"
-        bar.y_axis.title = "руб"
-        bar.style = 10
-        full_cost_idx = EXCEL_HEADERS.index("Полные затраты") + 1
-        revenue_idx = EXCEL_HEADERS.index("Выручка") + 1
-        data_ref = Reference(ws1, min_col=full_cost_idx, max_col=revenue_idx, min_row=header_row1, max_row=last_row1)
-        cats_ref = Reference(ws1, min_col=1, min_row=first_row1, max_row=last_row1)
-        bar.add_data(data_ref, titles_from_data=True)
-        bar.set_categories(cats_ref)
-        bar.series[0].graphicalProperties.solidFill = COLOR_COST
-        bar.series[1].graphicalProperties.solidFill = COLOR_REVENUE
-        bar.height, bar.width = 10, 24
-        ws1.add_chart(bar, f"{get_column_letter(N_COLS_EXCEL + 2)}{header_row1}")
-
-    struct_row0 = total_row1 + 3
-    ws1.cell(row=struct_row0, column=1, value="Структура выручки проекта")
-    ws1.cell(row=struct_row0, column=1).font = TITLE_FONT
-    struct_header_row = struct_row0 + 1
-    ws1.cell(row=struct_header_row, column=1, value="Статья выручки")
-    ws1.cell(row=struct_header_row, column=2, value="Сумма, руб")
-    style_header_row(ws1, struct_header_row, 2)
-
-    if N_ROWS > 0:
-        rng_type = f'${COL["Тип блока"]}${first_row1}:${COL["Тип блока"]}${last_row1}'
-        rng_apt = f'${COL["S квартир, м2"]}${first_row1}:${COL["S квартир, м2"]}${last_row1}'
-        rng_p_apt = f'${COL["Цена жилья, руб/м2"]}${first_row1}:${COL["Цена жилья, руб/м2"]}${last_row1}'
-        rng_c1 = f'${COL["S коммерции 1 эт., м2"]}${first_row1}:${COL["S коммерции 1 эт., м2"]}${last_row1}'
-        rng_p_c1 = f'${COL["Цена коммерции, руб/м2"]}${first_row1}:${COL["Цена коммерции, руб/м2"]}${last_row1}'
-        rng_storage = f'${COL["S кладовых, м2"]}${first_row1}:${COL["S кладовых, м2"]}${last_row1}'
-        rng_p_storage = f'${COL["Цена кладовых, руб/м2"]}${first_row1}:${COL["Цена кладовых, руб/м2"]}${last_row1}'
-        rng_underground = f'${COL["Подземный паркинг, м/м"]}${first_row1}:${COL["Подземный паркинг, м/м"]}${last_row1}'
-        rng_p_underground = f'${COL["Цена подземного м/м, руб"]}${first_row1}:${COL["Цена подземного м/м, руб"]}${last_row1}'
-        rng_ground = f'${COL["Наземный/Многоуровневый паркинг, м/м"]}${first_row1}:${COL["Наземный/Многоуровневый паркинг, м/м"]}${last_row1}'
-        rng_p_ground = f'${COL["Цена наземного м/м, руб"]}${first_row1}:${COL["Цена наземного м/м, руб"]}${last_row1}'
-        struct_formulas = [
-            ("Жилье", f'=SUMPRODUCT(({rng_type}="{TYPE_RESIDENTIAL}")*{rng_apt}*{rng_p_apt})*$B$4'),
-            ("Коммерция", f'=SUMPRODUCT(({rng_type}="{TYPE_RESIDENTIAL}")*{rng_c1}*{rng_p_c1})*$B$4'),
-            ("Кладовые", f'=SUMPRODUCT(({rng_type}="{TYPE_RESIDENTIAL}")*{rng_storage}*{rng_p_storage})*$B$4'),
-            ("Подземные м/м", f'=SUMPRODUCT(({rng_type}="{TYPE_RESIDENTIAL}")*{rng_underground}*{rng_p_underground})*$B$4'),
-            ("Наземные/Многоур. паркинги", f'=SUMPRODUCT(({rng_type}="{TYPE_PARKING}")*{rng_ground}*{rng_p_ground})*$B$4'),
-        ]
-    else:
-        struct_formulas = [(label, 0) for label in revenue_components.keys()]
-
-    for i, (label, formula) in enumerate(struct_formulas):
-        r = struct_header_row + 1 + i
-        c1 = ws1.cell(row=r, column=1, value=label)
-        c2 = ws1.cell(row=r, column=2, value=formula)
-        style_cell(c1)
-        style_cell(c2, number_format=MONEY_FMT)
-    struct_last_row = struct_header_row + len(struct_formulas)
-
-    pie = PieChart()
-    pie.title = "Структура выручки проекта"
-    data_ref = Reference(ws1, min_col=2, min_row=struct_header_row, max_row=struct_last_row)
-    cats_ref = Reference(ws1, min_col=1, min_row=struct_header_row + 1, max_row=struct_last_row)
-    pie.add_data(data_ref, titles_from_data=True)
-    pie.set_categories(cats_ref)
-    pie.dataLabels = DataLabelList()
-    pie.dataLabels.showPercent = True
-    pie.series[0].data_points = [
-        DataPoint(idx=i, spPr=GraphicalProperties(solidFill=PIE_COLORS[i % len(PIE_COLORS)]))
-        for i in range(len(struct_formulas))
-    ]
-    pie.height, pie.width = 10, 16
-    ws1.add_chart(pie, f"{get_column_letter(N_COLS_EXCEL + 2)}{struct_header_row}")
-
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    return buffer.getvalue()
-
-
-excel_bytes = build_excel_report()
-st.divider()
-st.download_button(
-    label="📥 Скачать отчет в Excel (2 листа, живые формулы + графики)",
-    data=excel_bytes,
-    file_name=f"financial_model_{scenario_name}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
+    style_header_row(ws1, header_row1, N_COLS_EXC
