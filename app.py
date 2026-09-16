@@ -30,17 +30,22 @@
     streamlit run app.py
 """
 
+import base64
 import io
+from io import BytesIO
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from PIL import Image as PILImage
 
 from openpyxl import Workbook
 from openpyxl.chart import BarChart, PieChart, Reference
 from openpyxl.chart.label import DataLabelList
 from openpyxl.chart.marker import DataPoint
 from openpyxl.chart.shapes import GraphicalProperties
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import column_index_from_string, get_column_letter
 
@@ -61,6 +66,251 @@ COLOR_ALLOC_COST = PALETTE["violet"]
 PIE_COLORS = [PALETTE["blue"], PALETTE["orange"], PALETTE["aqua"], PALETTE["yellow"], PALETTE["magenta"]]
 GROUP_COLORS = [PALETTE["blue"], PALETTE["orange"], PALETTE["aqua"], PALETTE["yellow"], PALETTE["magenta"]]
 
+# ----------------------------------------------------------------------
+# Фирменные цвета Талан — ТОЛЬКО для Excel-отчета (веб-графики Plotly выше
+# используют свою палитру PALETTE и не меняются).
+# ----------------------------------------------------------------------
+XL_GREEN = "41AA37"
+XL_GREEN2 = "84D26D"
+XL_GREEN3 = "B2DAAE"
+XL_GREEN4 = "D8E8D5"
+XL_BORDO = "AE4B67"
+XL_GRAY = "CECECE"
+XL_TEXT = "000000"
+XL_TEXT2 = "3F3F3F"
+XL_SURFACE = "F2F2F2"
+XL_WHITE = "FFFFFF"
+XL_FONT = "Arial"
+XL_GREEN_RAMP5 = [XL_GREEN, XL_GREEN2, XL_GREEN3, XL_GREEN4, XL_GRAY]
+
+# Логотип Талан (PNG, base64) — встраивается в Excel-отчет без внешних файлов.
+TALAN_LOGO_PNG_B64 = (
+    "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"
+    "YNTjqUSRUwAAAABJRU5ErkJggg=="
+)
+
 # ======================================================================
 # 1. НАСТРОЙКИ СТРАНИЦЫ И СЦЕНАРИИ
 # ======================================================================
@@ -76,7 +326,7 @@ BLOCK_TYPES = [TYPE_RESIDENTIAL, TYPE_PARKING]
 STAGE_MP = "МП (мастер-план)"
 STAGE_EP = "ЭП (эскизный проект)"
 DESIGN_STAGES = [STAGE_MP, STAGE_EP]
-MP_RATE_DEFAULT = 55_000.0
+MP_RATE_DEFAULT = 0.0
 
 SCENARIOS = {
     "Базовый": {"revenue": 1.00, "cost": 1.00},
@@ -129,7 +379,7 @@ ITEMS = [
     ("C.30.10", "Отделка стен (МОП/предчистовая)", "C", "руб/м² NSA", "NSA", 2800),
     ("C.30.20", "Отделка полов", "C", "руб/м² NSA", "NSA", 2200),
     ("C.30.30", "Отделка потолков", "C", "руб/м² NSA", "NSA", 1600),
-    ("D.10.10", "Лифты", "D", "руб/лифт", "ELEVATOR_COUNT", 3800000),
+    ("D.10.10", "Лифты", "D", "руб/остановку", "ELEVATOR_STOPS", 3800000),
     ("D.20.10", "Сантехническое оборудование", "D", "руб/квартиру", "APT_COUNT", 25000),
     ("D.20.20", "Водоснабжение", "D", "руб/м² NSA", "NSA", 900),
     ("D.20.30", "Хоз.быт. канализация", "D", "руб/м² NSA", "NSA", 850),
@@ -150,7 +400,7 @@ GROUP_LABELS = {
 }
 
 DEFAULT_RATES_DF = pd.DataFrame(
-    [{"Код": c, "Статья затрат": n, "Группа": g, "Единица измерения": u, "_basis": b, "Ставка, руб/ед.": r}
+    [{"Код": c, "Статья затрат": n, "Группа": g, "Единица измерения": u, "_basis": b, "Ставка, руб/ед.": 0.0}
      for c, n, g, u, b, r in ITEMS]
 )
 
@@ -180,7 +430,7 @@ ITEMS_G_AREA = [
     ("G.40.20", "Наружное освещение", "площадь участка, га", 350_000),
 ]
 DEFAULT_G_AREA_DF = pd.DataFrame(
-    [{"Код": c, "Статья затрат": n, "Единица измерения": u, "Ставка, руб/ед.": r} for c, n, u, r in ITEMS_G_AREA]
+    [{"Код": c, "Статья затрат": n, "Единица измерения": u, "Ставка, руб/ед.": 0.0} for c, n, u, r in ITEMS_G_AREA]
 )
 
 # Статьи G по сетям/кабелям — своей ТЭП-базы (длины) в методике нет, кол-во вводится вручную.
@@ -195,7 +445,7 @@ ITEMS_G_LENGTH = [
     ("G.40.10", "Сети электроснабжения, ТП", "п.м. кабеля", 400, 25_000),
 ]
 DEFAULT_G_LENGTH_DF = pd.DataFrame(
-    [{"Код": c, "Статья затрат": n, "Единица измерения": u, "Кол-во": q, "Ставка, руб/ед.": r}
+    [{"Код": c, "Статья затрат": n, "Единица измерения": u, "Кол-во": 0.0, "Ставка, руб/ед.": 0.0}
      for c, n, u, q, r in ITEMS_G_LENGTH]
 )
 
@@ -205,7 +455,7 @@ ITEMS_Z_PCT = [
     ("Z.20.10", "Непредвиденные расходы по объекту", 0.07),
 ]
 DEFAULT_Z_PCT_DF = pd.DataFrame(
-    [{"Код": c, "Статья затрат": n, "Ставка, доля от СМР+G": r} for c, n, r in ITEMS_Z_PCT]
+    [{"Код": c, "Статья затрат": n, "Ставка, доля от СМР+G": 0.0} for c, n, r in ITEMS_Z_PCT]
 )
 
 ITEMS_Z_FIXED = [
@@ -219,7 +469,7 @@ ITEMS_Z_FIXED = [
     ("Z.150", "Технологическое присоединение", 25_000_000),
 ]
 DEFAULT_Z_FIXED_DF = pd.DataFrame(
-    [{"Код": c, "Статья затрат": n, "Сумма, руб": s} for c, n, s in ITEMS_Z_FIXED]
+    [{"Код": c, "Статья затрат": n, "Сумма, руб": 0.0} for c, n, s in ITEMS_Z_FIXED]
 )
 
 
@@ -270,63 +520,11 @@ ALL_COLS = ["Название блока", "Тип блока"] + NUMERIC_COLS
 
 
 def generate_default_table() -> pd.DataFrame:
-    """Тестовый набор: 13 жилых урбан-блоков + 2 блока-паркинга (детерминированно)."""
-    rng = np.random.default_rng(11)
-    rows = []
-
-    for i in range(1, 14):
-        s_apt = int(rng.integers(6000, 16000) // 100 * 100)
-        s_c1 = int(rng.integers(150, 700) // 10 * 10)
-        s_storage = int(rng.integers(50, 400) // 10 * 10)
-        parking_u = int(rng.integers(60, 170) // 5 * 5)
-
-        # -- Доп. параметры для методики СМР, выведенные из площадей блока --
-        footprint = int(rng.integers(500, 1200))
-        vol_below = int(footprint * rng.uniform(4.0, 6.0))
-        nsa_est = s_apt + s_c1 + s_storage
-        vol_above = int(nsa_est * rng.uniform(3.2, 3.8))
-        area_facade = int(footprint * rng.uniform(2.0, 3.0))
-        area_glz_win = int(nsa_est * rng.uniform(0.15, 0.25))
-        apt_count = max(1, int(s_apt / rng.uniform(45, 65)))
-        area_glz_balcony = int(apt_count * rng.uniform(3, 6))
-        entrance_count = max(1, int(apt_count / rng.uniform(60, 100)))
-        elevator_count = max(1, int(round(entrance_count * rng.uniform(2, 3))))
-        plot_area_ga = round(footprint * rng.uniform(2.5, 4.0) / 10000, 2)
-
-        rows.append({
-            "Название блока": f"УБ {i}", "Тип блока": TYPE_RESIDENTIAL,
-            "S квартир, м2": s_apt, "S коммерции 1 эт., м2": s_c1, "S кладовых, м2": s_storage,
-            "Подземный паркинг, м/м": parking_u, "Наземный/Многоуровневый паркинг, м/м": 0,
-            "Цена жилья, руб/м2": int(rng.integers(150, 221) * 1000),
-            "Цена коммерции, руб/м2": int(rng.integers(200, 321) * 1000),
-            "Цена кладовых, руб/м2": int(rng.integers(40, 91) * 1000),
-            "Цена подземного м/м, руб": int(rng.integers(700, 1001) * 1000),
-            "Цена наземного м/м, руб": 0,
-            "Ставка СМР подземного м/м, руб": int(rng.integers(650, 821) * 1000),
-            "Ставка СМР наземного м/м, руб": 0,
-            "Площадь застройки, м2": footprint,
-            "Объем здания ниже 0, м3": vol_below,
-            "Объем здания выше 0, м3": vol_above,
-            "Площадь фасада, м2": area_facade,
-            "Площадь остекления окон, м2": area_glz_win,
-            "Площадь остекления лоджий, м2": area_glz_balcony,
-            "Кол-во квартир, шт": apt_count,
-            "Кол-во подъездов, шт": entrance_count,
-            "Кол-во лифтов, шт": elevator_count,
-            "Площадь участка блока, га": plot_area_ga,
-        })
-
-    for name, count in [("УБ-Паркинг 1", 1494), ("УБ-Паркинг 2", 1437)]:
-        row = {col: 0 for col in NUMERIC_COLS}
-        row.update({
-            "Название блока": name, "Тип блока": TYPE_PARKING,
-            "Наземный/Многоуровневый паркинг, м/м": count,
-            "Цена наземного м/м, руб": 450000,
-            "Ставка СМР наземного м/м, руб": 320000,
-        })
-        rows.append(row)
-
-    return pd.DataFrame(rows)[ALL_COLS]
+    """Пустой шаблон: один жилой урбан-блок («УБ 1») со всеми числовыми ТЭП = 0,
+    готовый для заполнения. Новые блоки добавляются через таблицу (+)."""
+    row = {col: 0.0 for col in NUMERIC_COLS}
+    row.update({"Название блока": "УБ 1", "Тип блока": TYPE_RESIDENTIAL})
+    return pd.DataFrame([row])[ALL_COLS]
 
 
 # ======================================================================
@@ -395,11 +593,11 @@ with st.sidebar:
         "чтобы расписать его на отдельные статьи (до 10 на раздел) — суммируются "
         "автоматически."
     )
-    cost_land = render_indirect_category("land", "Земля", 500_000_000.0)
-    cost_infra = render_indirect_category("infra", "Магистральные сети (на весь участок)", 300_000_000.0)
-    cost_landscape = render_indirect_category("landscape", "Благоустройство мест общего пользования", 150_000_000.0)
-    cost_social = render_indirect_category("social", "Социальные объекты (школы/сады)", 400_000_000.0)
-    cost_soft = render_indirect_category("soft", "Прочие Soft Costs", 100_000_000.0)
+    cost_land = render_indirect_category("land", "Земля", 0.0)
+    cost_infra = render_indirect_category("infra", "Магистральные сети (на весь участок)", 0.0)
+    cost_landscape = render_indirect_category("landscape", "Благоустройство мест общего пользования", 0.0)
+    cost_social = render_indirect_category("social", "Социальные объекты (школы/сады)", 0.0)
+    cost_soft = render_indirect_category("soft", "Прочие Soft Costs", 0.0)
     indirect_pool_sidebar = cost_land + cost_infra + cost_landscape + cost_social + cost_soft
     st.caption(f"Итого по этим статьям: {indirect_pool_sidebar:,.0f} руб (без G/Z)".replace(",", " "))
 
@@ -420,6 +618,8 @@ if "block_z_fixed" not in st.session_state:
     st.session_state.block_z_fixed = {}  # имя жилого блока -> DataFrame статей Z (прямой ввод суммы)
 if "block_mp_rate" not in st.session_state:
     st.session_state.block_mp_rate = {}  # имя жилого блока -> ставка коробки, руб/м2 NSA (этап МП)
+if "block_elevator_stops" not in st.session_state:
+    st.session_state.block_elevator_stops = {}  # имя жилого блока -> кол-во остановок лифтов (статья D.10.10)
 if "design_stage" not in st.session_state:
     st.session_state.design_stage = STAGE_EP  # общий на весь проект переключатель МП/ЭП для расчета коробки (A-E)
 if "tep_store" not in st.session_state:
@@ -543,19 +743,43 @@ st.session_state.block_g_area = {k: v for k, v in st.session_state.block_g_area.
 st.session_state.block_g_length = {k: v for k, v in st.session_state.block_g_length.items() if k in res_block_names}
 st.session_state.block_z_pct = {k: v for k, v in st.session_state.block_z_pct.items() if k in res_block_names}
 st.session_state.block_z_fixed = {k: v for k, v in st.session_state.block_z_fixed.items() if k in res_block_names}
-for _name in res_block_names:
+st.session_state.block_elevator_stops = {
+    k: v for k, v in st.session_state.block_elevator_stops.items() if k in res_block_names
+}
+# Новый блок наследует ставки (A-E, G, Z, МП, остановки лифтов) ИЗ ПРЕДЫДУЩЕГО блока в
+# списке — а не из каталога по умолчанию. Первый блок без предшественника берет пустой
+# шаблон (все ставки/суммы по умолчанию — 0).
+for _idx, _name in enumerate(res_block_names):
+    _prev = res_block_names[_idx - 1] if _idx > 0 else None
     if _name not in st.session_state.block_rates:
-        st.session_state.block_rates[_name] = DEFAULT_RATES_DF.copy()
+        st.session_state.block_rates[_name] = (
+            st.session_state.block_rates[_prev].copy() if _prev in st.session_state.block_rates
+            else DEFAULT_RATES_DF.copy()
+        )
     if _name not in st.session_state.block_g_area:
-        st.session_state.block_g_area[_name] = DEFAULT_G_AREA_DF.copy()
+        st.session_state.block_g_area[_name] = (
+            st.session_state.block_g_area[_prev].copy() if _prev in st.session_state.block_g_area
+            else DEFAULT_G_AREA_DF.copy()
+        )
     if _name not in st.session_state.block_g_length:
-        st.session_state.block_g_length[_name] = DEFAULT_G_LENGTH_DF.copy()
+        st.session_state.block_g_length[_name] = (
+            st.session_state.block_g_length[_prev].copy() if _prev in st.session_state.block_g_length
+            else DEFAULT_G_LENGTH_DF.copy()
+        )
     if _name not in st.session_state.block_z_pct:
-        st.session_state.block_z_pct[_name] = DEFAULT_Z_PCT_DF.copy()
+        st.session_state.block_z_pct[_name] = (
+            st.session_state.block_z_pct[_prev].copy() if _prev in st.session_state.block_z_pct
+            else DEFAULT_Z_PCT_DF.copy()
+        )
     if _name not in st.session_state.block_z_fixed:
-        st.session_state.block_z_fixed[_name] = DEFAULT_Z_FIXED_DF.copy()
+        st.session_state.block_z_fixed[_name] = (
+            st.session_state.block_z_fixed[_prev].copy() if _prev in st.session_state.block_z_fixed
+            else DEFAULT_Z_FIXED_DF.copy()
+        )
     if _name not in st.session_state.block_mp_rate:
-        st.session_state.block_mp_rate[_name] = MP_RATE_DEFAULT
+        st.session_state.block_mp_rate[_name] = st.session_state.block_mp_rate.get(_prev, MP_RATE_DEFAULT)
+    if _name not in st.session_state.block_elevator_stops:
+        st.session_state.block_elevator_stops[_name] = st.session_state.block_elevator_stops.get(_prev, 0.0)
 
 with tab_smr:
     st.subheader("Стадия проектирования")
@@ -582,7 +806,8 @@ with tab_smr:
         st.caption(
             "У каждого жилого блока может быть своя себестоимость коробки — выберите блок и при "
             "необходимости скорректируйте его ставки. Код, группа, единица и база расчета едины "
-            "по методике, редактируется только ставка. Новый блок получает ставки по умолчанию. "
+            "по методике, редактируется только ставка. Новый блок получает ставки ИЗ ПРЕДЫДУЩЕГО "
+            "урбан-блока в списке (не по умолчанию) — скорректируйте при необходимости. "
             "Названия блоков должны быть уникальны, иначе ставки будут общими на все блоки с "
             "одинаковым названием."
         )
@@ -615,6 +840,14 @@ with tab_smr:
                 },
             )
             st.session_state.block_rates[selected_block] = block_rates_edited
+
+            st.session_state.block_elevator_stops[selected_block] = st.number_input(
+                "Количество остановок (лифты, статья D.10.10) — расценка × кол-во остановок",
+                min_value=0.0,
+                value=float(st.session_state.block_elevator_stops.get(selected_block, 0.0)),
+                step=1.0,
+                key=f"elevator_stops_input_{selected_block}",
+            )
 
         st.divider()
         st.subheader(f"Наружные работы (код G) — блок «{selected_block}»")
@@ -660,8 +893,10 @@ with tab_smr:
         st.subheader(f"Прочие затраты, связанные с СМР (код Z) — блок «{selected_block}»")
         st.caption(
             "Часть статей считается как % от себестоимости СМР блока (коробка + наружные "
-            "работы G этого блока). Остальные статьи по методике не имеют формульной базы — "
-            "сумма берется «по объектам-аналогам» и вводится напрямую по блоку."
+            "работы G этого блока + подземный паркинг в составе блока — генподряд и "
+            "непредвиденные начисляются в т.ч. на паркинг). Остальные статьи по методике не "
+            "имеют формульной базы — сумма берется «по объектам-аналогам» и вводится напрямую "
+            "по блоку."
         )
         z_pct_edited = st.data_editor(
             st.session_state.block_z_pct[selected_block],
@@ -693,7 +928,16 @@ with tab_smr:
         st.info("Добавьте хотя бы один «Жилой блок» на вкладке «Финансовая модель», чтобы задать ставки СМР.")
 
 # -- Расчет себестоимости коробки по методике: у КАЖДОГО блока — свой каталог ставок --
-qty_by_basis = {b: get_basis_values(b, blocks, nsa) for b in set(code_to_basis.values())}
+# ELEVATOR_STOPS (кол-во остановок, статья D.10.10) — не колонка таблицы блоков, а
+# отдельный ручной ввод по блоку (session_state), т.к. кол-во лифтов у секций разное.
+elevator_stops_arr = np.array([
+    float(st.session_state.block_elevator_stops.get(blocks["Название блока"].iloc[i], 0.0)) if is_res[i] else 0.0
+    for i in range(N_ROWS)
+])
+qty_by_basis = {
+    b: (elevator_stops_arr if b == "ELEVATOR_STOPS" else get_basis_values(b, blocks, nsa))
+    for b in set(code_to_basis.values())
+}
 
 item_cost_matrix = {code: np.zeros(N_ROWS) for code in item_codes_master}  # код -> np.array по блокам
 block_rate_series = {}  # имя блока -> Series(код -> ставка) — для итогов/детализации
@@ -802,7 +1046,11 @@ for i in range(N_ROWS):
     z_fixed_total[i] = float(pd.to_numeric(z_fixed_block["Сумма, руб"], errors="coerce").fillna(0.0).sum())
 
 g_block_total = g_area_total + g_length_total
-zg_base = smr_korobka_raw + g_block_total  # база для % статей Z — своя у каждого блока (коробка + G блока)
+# Подземный паркинг в составе урбан-блока — статьи Z.10.10 (генподряд) и Z.20.10
+# (непредвиденные) начисляются в т.ч. на его стоимость, поэтому база для % включает
+# и стоимость подземного паркинга блока (та же % ставка, что и у блока).
+parking_cost_block = (blocks["Подземный паркинг, м/м"] * blocks["Ставка СМР подземного м/м, руб"]).to_numpy(dtype=float)
+zg_base = smr_korobka_raw + g_block_total + parking_cost_block  # база для % статей Z по блоку
 
 for i in range(N_ROWS):
     if not is_res[i]:
@@ -825,7 +1073,7 @@ with tab_smr:
         gz_m1.metric("Наружные работы блока (G)", f"{g_block_total[sel_idx]:,.0f} руб".replace(",", " "))
         gz_m2.metric("Прочие затраты блока (Z)", f"{z_block_total[sel_idx]:,.0f} руб".replace(",", " "))
         st.caption(
-            f"База для % статей Z этого блока (СМР коробки + G блока): "
+            f"База для % статей Z этого блока (СМР коробки + G блока + подземный паркинг блока): "
             f"{zg_base[sel_idx]:,.0f} руб".replace(",", " ")
         )
 
@@ -987,16 +1235,27 @@ with tab_main:
 # ======================================================================
 # 10. ЭКСПОРТ В EXCEL (openpyxl) — ЖИВЫЕ ФОРМУЛЫ, 2 ЛИСТА, ВСТРОЕННЫЕ ГРАФИКИ
 # ======================================================================
-THIN = Side(style="thin", color="B0B0B0")
+THIN = Side(style="thin", color="D9D9D9")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-HEADER_FILL = PatternFill(start_color="1F3864", end_color="1F3864", fill_type="solid")
-HEADER_FONT = Font(bold=True, color="FFFFFF")
-TITLE_FONT = Font(bold=True, size=13)
-PARAM_FONT = Font(bold=True)
-TOTAL_FILL = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
-TOTAL_FONT = Font(bold=True)
+THICK_TOP_GREEN = Side(style="medium", color=XL_GREEN)
+HEADER_FILL = PatternFill(start_color=XL_GREEN, end_color=XL_GREEN, fill_type="solid")
+HEADER_FONT = Font(name=XL_FONT, bold=True, color=XL_WHITE, size=10)
+TITLE_FONT = Font(name=XL_FONT, bold=True, size=14, color=XL_GREEN)
+SUBTITLE_FONT = Font(name=XL_FONT, size=11, color=XL_TEXT2)
+PARAM_FONT = Font(name=XL_FONT, bold=True, color=XL_TEXT2)
+TOTAL_FILL = PatternFill(start_color=XL_GREEN3, end_color=XL_GREEN3, fill_type="solid")
+TOTAL_FONT = Font(name=XL_FONT, bold=True, color=XL_TEXT)
+ZEBRA_FILL = PatternFill(start_color=XL_GREEN4, end_color=XL_GREEN4, fill_type="solid")
+WHITE_FILL = PatternFill(start_color=XL_WHITE, end_color=XL_WHITE, fill_type="solid")
+DATA_FONT = Font(name=XL_FONT, size=10, color=XL_TEXT)
 MONEY_FMT = "#,##0"
 PERCENT_FMT = "0.0%"
+MONEY_MM_FMT = '#,##0.0,, "млн ₽"'
+
+
+def zebra(i: int) -> PatternFill:
+    """Чередующаяся заливка строк данных по индексу i (0-based)."""
+    return ZEBRA_FILL if i % 2 == 1 else WHITE_FILL
 
 SHEET1_NAME = "Экономика проекта"
 SHEET2_NAME = "СМР по методике"
@@ -1033,8 +1292,7 @@ def style_cell(cell, number_format=None, bold=False, fill=None):
     cell.border = BORDER
     if number_format:
         cell.number_format = number_format
-    if bold:
-        cell.font = TOTAL_FONT
+    cell.font = TOTAL_FONT if bold else DATA_FONT
     if fill:
         cell.fill = fill
 
@@ -1102,14 +1360,15 @@ def build_excel_report() -> bytes:
             r2 = calc_first_row + i
             r1 = first_row1 + i
             block_name = row["Название блока"]
-            style_cell(ws2.cell(row=r2, column=1, value=block_name))
-            style_cell(ws2.cell(row=r2, column=2, value=row["Тип блока"]))
+            row_fill = zebra(i)
+            style_cell(ws2.cell(row=r2, column=1, value=block_name), fill=row_fill)
+            style_cell(ws2.cell(row=r2, column=2, value=row["Тип блока"]), fill=row_fill)
             nsa_ref = f"'{SHEET1_NAME}'!{COL['NSA, м2']}{r1}"
-            style_cell(ws2.cell(row=r2, column=3, value=f"={nsa_ref}"), number_format=MONEY_FMT)
+            style_cell(ws2.cell(row=r2, column=3, value=f"={nsa_ref}"), number_format=MONEY_FMT, fill=row_fill)
             rate_val = float(st.session_state.block_mp_rate.get(block_name, 0.0)) if row["Тип блока"] == TYPE_RESIDENTIAL else 0.0
-            style_cell(ws2.cell(row=r2, column=4, value=rate_val), number_format=MONEY_FMT)
+            style_cell(ws2.cell(row=r2, column=4, value=rate_val), number_format=MONEY_FMT, fill=row_fill)
             total_cell = ws2.cell(row=r2, column=total_col_idx2, value=f"=C{r2}*D{r2}")
-            style_cell(total_cell, number_format=MONEY_FMT, bold=True, fill=TOTAL_FILL)
+            style_cell(total_cell, number_format=MONEY_MM_FMT, bold=True, fill=TOTAL_FILL)
         calc_last_row = calc_first_row + N_ROWS - 1
 
         autosize(ws2, len(calc_headers2), width=17)
@@ -1126,7 +1385,7 @@ def build_excel_report() -> bytes:
             cats_ref2 = Reference(ws2, min_col=1, min_row=calc_first_row, max_row=calc_last_row)
             bar2.add_data(data_ref2, titles_from_data=True)
             bar2.set_categories(cats_ref2)
-            bar2.series[0].graphicalProperties.solidFill = COLOR_DIRECT_COST
+            bar2.series[0].graphicalProperties.solidFill = XL_GREEN
             bar2.height, bar2.width = 10, 22
             ws2.add_chart(bar2, f"{get_column_letter(total_col_idx2 + 2)}{calc_header_row}")
 
@@ -1152,17 +1411,29 @@ def build_excel_report() -> bytes:
         for i, code in enumerate(item_codes_master):
             r = rates_first_row + i
             rate_row_by_code[code] = r
+            row_fill = zebra(i)
             vals = [code, code_to_name[code], code_to_group[code], code_to_unit[code]]
             for j, v in enumerate(vals, start=1):
-                style_cell(ws2.cell(row=r, column=j, value=v))
+                style_cell(ws2.cell(row=r, column=j, value=v), fill=row_fill)
             for block_idx, name in enumerate(res_block_names):
                 rate_val = float(block_rate_series.get(name, pd.Series(dtype=float)).get(code, 0.0))
                 cell = ws2.cell(row=r, column=5 + block_idx, value=rate_val)
-                style_cell(cell, number_format=MONEY_FMT)
+                style_cell(cell, number_format=MONEY_FMT, fill=row_fill)
         rates_last_row = rates_first_row + len(item_codes_master) - 1
 
+        # -- Кол-во остановок лифтов (статья D.10.10) — отдельный ручной ввод по блоку,
+        #    не колонка листа 1 (в разных секциях разное число лифтов/остановок). --
+        stops_row = rates_last_row + 1
+        style_cell(ws2.cell(row=stops_row, column=1, value="—"))
+        style_cell(ws2.cell(row=stops_row, column=2, value="Кол-во остановок (для D.10.10)"))
+        style_cell(ws2.cell(row=stops_row, column=3, value="D"))
+        style_cell(ws2.cell(row=stops_row, column=4, value="шт"))
+        for block_idx, name in enumerate(res_block_names):
+            stops_val = float(st.session_state.block_elevator_stops.get(name, 0.0))
+            style_cell(ws2.cell(row=stops_row, column=5 + block_idx, value=stops_val), number_format="0")
+
         # -- Расчет по блокам: строки = блоки (в том же порядке, что на листе 1) --
-        calc_title_row = rates_last_row + 3
+        calc_title_row = stops_row + 3
         ws2.cell(row=calc_title_row, column=1, value="Себестоимость коробки по блокам (только «Жилой блок»)")
         ws2.cell(row=calc_title_row, column=1).font = PARAM_FONT
         calc_header_row = calc_title_row + 1
@@ -1178,10 +1449,11 @@ def build_excel_report() -> bytes:
             r2 = calc_first_row + i
             r1 = first_row1 + i  # соответствующая строка на листе 1 (тот же порядок блоков)
             block_name = row["Название блока"]
+            row_fill = zebra(i)
             ws2.cell(row=r2, column=1, value=block_name)
             ws2.cell(row=r2, column=2, value=row["Тип блока"])
-            style_cell(ws2.cell(row=r2, column=1))
-            style_cell(ws2.cell(row=r2, column=2))
+            style_cell(ws2.cell(row=r2, column=1), fill=row_fill)
+            style_cell(ws2.cell(row=r2, column=2), fill=row_fill)
 
             type_ref = f"'{SHEET1_NAME}'!{COL['Тип блока']}{r1}"
             rate_col_letter = rate_col_for_block.get(block_name)
@@ -1193,6 +1465,8 @@ def build_excel_report() -> bytes:
                     qty_ref = f"('{SHEET1_NAME}'!{COL['Объем здания ниже 0, м3']}{r1}+'{SHEET1_NAME}'!{COL['Объем здания выше 0, м3']}{r1})"
                 elif basis_key == "STORAGE_AREA":
                     qty_ref = f"'{SHEET1_NAME}'!{COL['S кладовых, м2']}{r1}"
+                elif basis_key == "ELEVATOR_STOPS":
+                    qty_ref = f"{rate_col_letter}${stops_row}" if rate_col_letter is not None else "0"
                 else:
                     basis_col_name = BASIS_COLUMN[basis_key]
                     qty_ref = f"'{SHEET1_NAME}'!{COL[basis_col_name]}{r1}"
@@ -1202,17 +1476,18 @@ def build_excel_report() -> bytes:
                 else:
                     formula = 0  # блок-паркинг — каталога ставок методики у него нет
                 cell = ws2.cell(row=r2, column=3 + k, value=formula)
-                style_cell(cell, number_format=MONEY_FMT)
+                style_cell(cell, number_format=MONEY_FMT, fill=row_fill)
 
             first_item_col = get_column_letter(3)
             last_item_col = get_column_letter(2 + len(item_codes))
             total_cell = ws2.cell(row=r2, column=total_col_idx2, value=f"=SUM({first_item_col}{r2}:{last_item_col}{r2})")
-            style_cell(total_cell, number_format=MONEY_FMT, bold=True, fill=TOTAL_FILL)
+            style_cell(total_cell, number_format=MONEY_MM_FMT, bold=True, fill=TOTAL_FILL)
         calc_last_row = calc_first_row + N_ROWS - 1
 
         autosize(ws2, len(calc_headers2), width=13)
         ws2.column_dimensions["A"].width = 16
         ws2.column_dimensions["B"].width = 24
+        ws2.column_dimensions[get_column_letter(total_col_idx2)].width = 15
         for name, col_letter in rate_col_for_block.items():
             ws2.column_dimensions[col_letter].width = 16
 
@@ -1264,7 +1539,7 @@ def build_excel_report() -> bytes:
             cats_ref2 = Reference(ws2, min_col=1, min_row=calc_first_row, max_row=calc_last_row)
             bar2.add_data(data_ref2, titles_from_data=True)
             bar2.set_categories(cats_ref2)
-            bar2.series[0].graphicalProperties.solidFill = COLOR_DIRECT_COST
+            bar2.series[0].graphicalProperties.solidFill = XL_GREEN
             bar2.height, bar2.width = 10, 22
             ws2.add_chart(bar2, f"{get_column_letter(total_col_idx2 + 2)}{calc_header_row}")
 
@@ -1276,8 +1551,12 @@ def build_excel_report() -> bytes:
             pie2.set_categories(cats_ref_g)
             pie2.dataLabels = DataLabelList()
             pie2.dataLabels.showPercent = True
+            pie2.dataLabels.showCatName = False
+            pie2.dataLabels.showSerName = False
+            pie2.dataLabels.showVal = False
+            pie2.dataLabels.showLegendKey = False
             pie2.series[0].data_points = [
-                DataPoint(idx=i, spPr=GraphicalProperties(solidFill=GROUP_COLORS[i % len(GROUP_COLORS)]))
+                DataPoint(idx=i, spPr=GraphicalProperties(solidFill=XL_GREEN_RAMP5[i % len(XL_GREEN_RAMP5)]))
                 for i in range(len(group_order))
             ]
             pie2.height, pie2.width = 10, 14
@@ -1442,14 +1721,16 @@ def build_excel_report() -> bytes:
     gz_headers = [
         "Название блока", "Тип блока", "Площадь участка блока, га",
         "G: площадь участка, руб", "G: сети/кабели, руб", "ИТОГО G, руб",
-        "Себестоимость коробки (A-E), руб", "База для % Z (короб.+G), руб",
+        "Себестоимость коробки (A-E), руб", "Подземный паркинг блока, руб",
+        "База для % Z (короб.+G+паркинг), руб",
         "Z: % от базы, руб", "Z: прямой ввод, руб", "ИТОГО Z, руб",
     ]
     for j, h in enumerate(gz_headers, start=1):
         ws2.cell(row=gz_header_row, column=j, value=h)
     style_header_row(ws2, gz_header_row, len(gz_headers))
     GZ_COL_PLOT, GZ_COL_GAREA, GZ_COL_GLEN, GZ_COL_GTOTAL = 3, 4, 5, 6
-    GZ_COL_KOROBKA, GZ_COL_ZBASE, GZ_COL_ZPCT, GZ_COL_ZFIXED, GZ_COL_ZTOTAL = 7, 8, 9, 10, 11
+    GZ_COL_KOROBKA, GZ_COL_PARKING, GZ_COL_ZBASE = 7, 8, 9
+    GZ_COL_ZPCT, GZ_COL_ZFIXED, GZ_COL_ZTOTAL = 10, 11, 12
 
     gz_first_row = gz_header_row + 1
     for i, (_, row) in enumerate(blocks.iterrows()):
@@ -1457,18 +1738,19 @@ def build_excel_report() -> bytes:
         r1 = first_row1 + i
         r2 = calc_first_row + i
         block_name = row["Название блока"]
-        style_cell(ws2.cell(row=r, column=1, value=block_name))
-        style_cell(ws2.cell(row=r, column=2, value=row["Тип блока"]))
+        row_fill = zebra(i)
+        style_cell(ws2.cell(row=r, column=1, value=block_name), fill=row_fill)
+        style_cell(ws2.cell(row=r, column=2, value=row["Тип блока"]), fill=row_fill)
 
         plot_area_ref = f"'{SHEET1_NAME}'!{COL['Площадь участка блока, га']}{r1}"
-        style_cell(ws2.cell(row=r, column=GZ_COL_PLOT, value=f"={plot_area_ref}"), number_format="0.00")
+        style_cell(ws2.cell(row=r, column=GZ_COL_PLOT, value=f"={plot_area_ref}"), number_format="0.00", fill=row_fill)
 
         g_area_rate_col = rate_col_for_g_area.get(block_name)
         g_area_formula = (
             f"={plot_area_ref}*SUM({g_area_rate_col}{g_area_first_row}:{g_area_rate_col}{g_area_last_row})"
             if g_area_rate_col is not None else 0
         )
-        style_cell(ws2.cell(row=r, column=GZ_COL_GAREA, value=g_area_formula), number_format=MONEY_FMT)
+        style_cell(ws2.cell(row=r, column=GZ_COL_GAREA, value=g_area_formula), number_format=MONEY_FMT, fill=row_fill)
 
         qty_col, rate_col = glen_cols_for_block.get(block_name, (None, None))
         g_length_formula = (
@@ -1476,30 +1758,41 @@ def build_excel_report() -> bytes:
             f"{rate_col}{g_length_first_row}:{rate_col}{g_length_last_row})"
             if qty_col is not None else 0
         )
-        style_cell(ws2.cell(row=r, column=GZ_COL_GLEN, value=g_length_formula), number_format=MONEY_FMT)
+        style_cell(ws2.cell(row=r, column=GZ_COL_GLEN, value=g_length_formula), number_format=MONEY_FMT, fill=row_fill)
 
         g_total_formula = f"={get_column_letter(GZ_COL_GAREA)}{r}+{get_column_letter(GZ_COL_GLEN)}{r}"
         style_cell(ws2.cell(row=r, column=GZ_COL_GTOTAL, value=g_total_formula), number_format=MONEY_FMT, bold=True, fill=TOTAL_FILL)
 
         korobka_formula = f"={get_column_letter(total_col_idx2)}{r2}"
-        style_cell(ws2.cell(row=r, column=GZ_COL_KOROBKA, value=korobka_formula), number_format=MONEY_FMT)
+        style_cell(ws2.cell(row=r, column=GZ_COL_KOROBKA, value=korobka_formula), number_format=MONEY_MM_FMT, fill=row_fill)
 
-        zbase_formula = f"={get_column_letter(GZ_COL_KOROBKA)}{r}+{get_column_letter(GZ_COL_GTOTAL)}{r}"
-        style_cell(ws2.cell(row=r, column=GZ_COL_ZBASE, value=zbase_formula), number_format=MONEY_FMT)
+        # Подземный паркинг в составе урбан-блока — генподряд/непредвиденные (Z%)
+        # начисляются в т.ч. на его стоимость (та же % ставка блока).
+        parking_formula = (
+            f"='{SHEET1_NAME}'!{COL['Подземный паркинг, м/м']}{r1}"
+            f"*'{SHEET1_NAME}'!{COL['Ставка СМР подземного м/м, руб']}{r1}"
+        )
+        style_cell(ws2.cell(row=r, column=GZ_COL_PARKING, value=parking_formula), number_format=MONEY_FMT, fill=row_fill)
+
+        zbase_formula = (
+            f"={get_column_letter(GZ_COL_KOROBKA)}{r}+{get_column_letter(GZ_COL_GTOTAL)}{r}"
+            f"+{get_column_letter(GZ_COL_PARKING)}{r}"
+        )
+        style_cell(ws2.cell(row=r, column=GZ_COL_ZBASE, value=zbase_formula), number_format=MONEY_MM_FMT, fill=row_fill)
 
         z_pct_rate_col = rate_col_for_z_pct.get(block_name)
         z_pct_formula = (
             f"={get_column_letter(GZ_COL_ZBASE)}{r}*SUM({z_pct_rate_col}{z_pct_first_row}:{z_pct_rate_col}{z_pct_last_row})"
             if z_pct_rate_col is not None else 0
         )
-        style_cell(ws2.cell(row=r, column=GZ_COL_ZPCT, value=z_pct_formula), number_format=MONEY_FMT)
+        style_cell(ws2.cell(row=r, column=GZ_COL_ZPCT, value=z_pct_formula), number_format=MONEY_FMT, fill=row_fill)
 
         z_fixed_col = sum_col_for_z_fixed.get(block_name)
         z_fixed_formula = (
             f"=SUM({z_fixed_col}{z_fixed_first_row}:{z_fixed_col}{z_fixed_last_row})"
             if z_fixed_col is not None else 0
         )
-        style_cell(ws2.cell(row=r, column=GZ_COL_ZFIXED, value=z_fixed_formula), number_format=MONEY_FMT)
+        style_cell(ws2.cell(row=r, column=GZ_COL_ZFIXED, value=z_fixed_formula), number_format=MONEY_FMT, fill=row_fill)
 
         z_total_formula = f"={get_column_letter(GZ_COL_ZPCT)}{r}+{get_column_letter(GZ_COL_ZFIXED)}{r}"
         style_cell(ws2.cell(row=r, column=GZ_COL_ZTOTAL, value=z_total_formula), number_format=MONEY_FMT, bold=True, fill=TOTAL_FILL)
@@ -1597,8 +1890,8 @@ def build_excel_report() -> bytes:
         cats_ref = Reference(ws1, min_col=1, min_row=first_row1, max_row=last_row1)
         bar.add_data(data_ref, titles_from_data=True)
         bar.set_categories(cats_ref)
-        bar.series[0].graphicalProperties.solidFill = COLOR_COST
-        bar.series[1].graphicalProperties.solidFill = COLOR_REVENUE
+        bar.series[0].graphicalProperties.solidFill = XL_GRAY
+        bar.series[1].graphicalProperties.solidFill = XL_GREEN
         bar.height, bar.width = 10, 24
         ws1.add_chart(bar, f"{get_column_letter(N_COLS_EXCEL + 2)}{header_row1}")
 
@@ -1648,12 +1941,188 @@ def build_excel_report() -> bytes:
     pie.set_categories(cats_ref)
     pie.dataLabels = DataLabelList()
     pie.dataLabels.showPercent = True
+    pie.dataLabels.showCatName = False
+    pie.dataLabels.showSerName = False
+    pie.dataLabels.showVal = False
+    pie.dataLabels.showLegendKey = False
     pie.series[0].data_points = [
-        DataPoint(idx=i, spPr=GraphicalProperties(solidFill=PIE_COLORS[i % len(PIE_COLORS)]))
+        DataPoint(idx=i, spPr=GraphicalProperties(solidFill=XL_GREEN_RAMP5[i % len(XL_GREEN_RAMP5)]))
         for i in range(len(struct_formulas))
     ]
     pie.height, pie.width = 10, 16
     ws1.add_chart(pie, f"{get_column_letter(N_COLS_EXCEL + 2)}{struct_header_row}")
+
+    # ------------------------------------------------------------------
+    # Логотип Талан в шапке листов 1 и 2
+    # ------------------------------------------------------------------
+    logo_bytes = base64.b64decode(TALAN_LOGO_PNG_B64)
+    logo_img1 = XLImage(PILImage.open(BytesIO(logo_bytes)))
+    logo_img1.width, logo_img1.height = 170, 32
+    ws1.add_image(logo_img1, f"{get_column_letter(N_COLS_EXCEL + 2)}1")
+    ws1.sheet_view.showGridLines = False
+
+    logo_img2 = XLImage(PILImage.open(BytesIO(logo_bytes)))
+    logo_img2.width, logo_img2.height = 170, 32
+    ws2.add_image(logo_img2, f"{get_column_letter(total_col_idx2 + 2)}1")
+    ws2.sheet_view.showGridLines = False
+
+    # ------------------------------------------------------------------
+    # Лист "Дашборд" — ключевые метрики проекта одним экраном (для ГД)
+    # ------------------------------------------------------------------
+    ws_dash = wb.create_sheet("Дашборд", 0)
+    ws_dash.sheet_view.showGridLines = False
+    for col, w in {"A": 3, "B": 23, "C": 23, "D": 23, "E": 23, "F": 23, "G": 23, "H": 3}.items():
+        ws_dash.column_dimensions[col].width = w
+
+    logo_dash = XLImage(PILImage.open(BytesIO(logo_bytes)))
+    logo_dash.width, logo_dash.height = 220, 41
+    ws_dash.add_image(logo_dash, "B2")
+    ws_dash.row_dimensions[1].height = 8
+    for r in range(2, 6):
+        ws_dash.row_dimensions[r].height = 20
+
+    ws_dash["B7"] = f'="Финансовая модель — "&\'{SHEET1_NAME}\'!A1'
+    ws_dash["B7"].font = Font(name=XL_FONT, size=16, bold=True, color=XL_TEXT)
+    ws_dash.merge_cells("B7:G7")
+    ws_dash["B8"] = (
+        f'="Город: "&SUBSTITUTE(\'{SHEET1_NAME}\'!A2,"Город: ","")&"   |   "&\'{SHEET1_NAME}\'!A3'
+    )
+    ws_dash["B8"].font = Font(name=XL_FONT, size=11, color=XL_TEXT2)
+    ws_dash.merge_cells("B8:G8")
+    ws_dash.row_dimensions[7].height = 24
+
+    FILL_TILE = PatternFill("solid", fgColor=XL_GREEN4)
+    THICK_TOP = Side(style="medium", color=XL_GREEN)
+
+    kpi_row = 10
+    tile_h = 4
+    tiles = [
+        ("Выручка", f"='{SHEET1_NAME}'!{COL['Выручка']}{total_row1}", MONEY_MM_FMT),
+        ("Полные затраты", f"='{SHEET1_NAME}'!{COL['Полные затраты']}{total_row1}", MONEY_MM_FMT),
+        ("Валовая прибыль", f"='{SHEET1_NAME}'!{COL['Валовая прибыль']}{total_row1}", MONEY_MM_FMT),
+        ("Рентабельность", f"='{SHEET1_NAME}'!{COL['Рентабельность']}{total_row1}", PERCENT_FMT),
+        ("NSA проекта, м2", f"='{SHEET1_NAME}'!{COL['NSA, м2']}{total_row1}", '#,##0 "м²"'),
+        ("Пул косвенных, база", "='" + SHEET1_NAME + "'!H4", MONEY_MM_FMT),
+    ]
+    dash_cols = ["B", "C", "D", "E", "F", "G"]
+    for col, (label, formula, fmt) in zip(dash_cols, tiles):
+        top = kpi_row
+        bottom = kpi_row + tile_h - 1
+        for r in range(top, bottom + 1):
+            ws_dash[f"{col}{r}"].fill = FILL_TILE
+        ws_dash[f"{col}{top}"].border = Border(top=THICK_TOP)
+
+        ws_dash.merge_cells(f"{col}{top}:{col}{top + 1}")
+        lbl_cell = ws_dash[f"{col}{top}"]
+        lbl_cell.alignment = Alignment(horizontal="left", vertical="top", wrap_text=True, indent=1)
+        lbl_cell.font = Font(name=XL_FONT, size=10, bold=True, color=XL_TEXT2)
+        lbl_cell.value = label
+
+        val_row = top + 2
+        ws_dash.merge_cells(f"{col}{val_row}:{col}{bottom}")
+        val_cell = ws_dash[f"{col}{val_row}"]
+        val_cell.value = formula
+        val_cell.number_format = fmt
+        val_cell.font = Font(name=XL_FONT, size=15, bold=True, color=XL_GREEN if fmt != PERCENT_FMT else XL_BORDO)
+        val_cell.alignment = Alignment(horizontal="left", vertical="bottom", indent=1)
+    for r in range(kpi_row, kpi_row + tile_h):
+        ws_dash.row_dimensions[r].height = 16
+
+    chart_top = kpi_row + tile_h + 2
+
+    # --- диаграмма 1: выручка / затраты / прибыль по блокам ---
+    ws_dash[f"B{chart_top}"] = "Выручка, затраты и прибыль по блокам"
+    ws_dash[f"B{chart_top}"].font = Font(name=XL_FONT, size=12, bold=True, color=XL_GREEN)
+
+    if N_ROWS > 0:
+        dash_bar = BarChart()
+        dash_bar.type = "col"
+        dash_bar.grouping = "clustered"
+        dash_bar.style = 2
+        dash_bar.y_axis.numFmt = MONEY_MM_FMT
+        dash_bar.height, dash_bar.width = 8.5, 17
+        dash_cats = Reference(ws1, min_col=1, min_row=first_row1, max_row=last_row1)
+        dash_data_cost = Reference(ws1, min_col=EXCEL_HEADERS.index("Полные затраты") + 1,
+                                    min_row=header_row1, max_row=last_row1)
+        dash_data_rev = Reference(ws1, min_col=EXCEL_HEADERS.index("Выручка") + 1,
+                                   min_row=header_row1, max_row=last_row1)
+        dash_data_profit = Reference(ws1, min_col=EXCEL_HEADERS.index("Валовая прибыль") + 1,
+                                      min_row=header_row1, max_row=last_row1)
+        dash_bar.add_data(dash_data_cost, titles_from_data=True)
+        dash_bar.add_data(dash_data_rev, titles_from_data=True)
+        dash_bar.add_data(dash_data_profit, titles_from_data=True)
+        dash_bar.set_categories(dash_cats)
+        dash_bar.series[0].graphicalProperties.solidFill = XL_GRAY
+        dash_bar.series[1].graphicalProperties.solidFill = XL_GREEN
+        dash_bar.series[2].graphicalProperties.solidFill = XL_BORDO
+        dash_bar.legend.position = "b"
+        ws_dash.add_chart(dash_bar, f"B{chart_top + 1}")
+
+    # --- диаграмма 2: структура полных затрат проекта ---
+    struct_row = chart_top + 1
+    ws_dash[f"F{chart_top}"] = "Структура полных затрат"
+    ws_dash[f"F{chart_top}"].font = Font(name=XL_FONT, size=12, bold=True, color=XL_GREEN)
+    cost_labels = ["Косвенные (пул)", "Коробка (методика)", "Наружные работы (G)", "Прочие СМР (Z)", "Паркинги"]
+    ws_dash[f"F{struct_row}"] = "Статья"
+    ws_dash[f"G{struct_row}"] = "Сумма, руб"
+    for i, lbl in enumerate(cost_labels):
+        ws_dash[f"F{struct_row + 1 + i}"] = lbl
+    for r in range(struct_row, struct_row + 1 + len(cost_labels)):
+        ws_dash[f"F{r}"].font = Font(name=XL_FONT, size=10, color=XL_TEXT)
+        ws_dash[f"G{r}"].font = Font(name=XL_FONT, size=10, color=XL_TEXT)
+
+    if N_ROWS > 0:
+        rng_park_u = f"'{SHEET1_NAME}'!${COL['Подземный паркинг, м/м']}${first_row1}:${COL['Подземный паркинг, м/м']}${last_row1}"
+        rng_park_u_rate = f"'{SHEET1_NAME}'!${COL['Ставка СМР подземного м/м, руб']}${first_row1}:${COL['Ставка СМР подземного м/м, руб']}${last_row1}"
+        rng_park_g = f"'{SHEET1_NAME}'!${COL['Наземный/Многоуровневый паркинг, м/м']}${first_row1}:${COL['Наземный/Многоуровневый паркинг, м/м']}${last_row1}"
+        rng_park_g_rate = f"'{SHEET1_NAME}'!${COL['Ставка СМР наземного м/м, руб']}${first_row1}:${COL['Ставка СМР наземного м/м, руб']}${last_row1}"
+        parking_total_formula = (
+            f"=(SUMPRODUCT({rng_park_u},{rng_park_u_rate})+SUMPRODUCT({rng_park_g},{rng_park_g_rate}))*'{SHEET1_NAME}'!$E$4"
+        )
+    else:
+        parking_total_formula = 0
+    ws_dash[f"G{struct_row + 1}"] = f"='{SHEET1_NAME}'!{COL['Аллоцированные затраты']}{total_row1}"
+    ws_dash[f"G{struct_row + 2}"] = f"='{SHEET1_NAME}'!{COL['Себестоимость коробки (методика)']}{total_row1}"
+    ws_dash[f"G{struct_row + 3}"] = f"='{SHEET1_NAME}'!{COL['Наружные работы блока (G), руб']}{total_row1}"
+    ws_dash[f"G{struct_row + 4}"] = f"='{SHEET1_NAME}'!{COL['Прочие затраты блока (Z), руб']}{total_row1}"
+    ws_dash[f"G{struct_row + 5}"] = parking_total_formula
+    for r in range(struct_row + 1, struct_row + 1 + len(cost_labels)):
+        ws_dash[f"G{r}"].number_format = MONEY_MM_FMT
+
+    dash_pie = PieChart()
+    dash_pie.height, dash_pie.width = 8.5, 10.5
+    dash_data_pie = Reference(ws_dash, min_col=7, min_row=struct_row, max_row=struct_row + len(cost_labels))
+    dash_cats_pie = Reference(ws_dash, min_col=6, min_row=struct_row + 1, max_row=struct_row + len(cost_labels))
+    dash_pie.add_data(dash_data_pie, titles_from_data=True)
+    dash_pie.set_categories(dash_cats_pie)
+    dash_pie.dataLabels = DataLabelList()
+    dash_pie.dataLabels.showPercent = True
+    dash_pie.dataLabels.showCatName = False
+    dash_pie.dataLabels.showSerName = False
+    dash_pie.dataLabels.showVal = False
+    dash_pie.dataLabels.showLegendKey = False
+    dash_pie.legend.position = "b"
+    dash_pie.series[0].data_points = [
+        DataPoint(idx=i, spPr=GraphicalProperties(solidFill=XL_GREEN_RAMP5[i % len(XL_GREEN_RAMP5)]))
+        for i in range(len(cost_labels))
+    ]
+    ws_dash.add_chart(dash_pie, f"F{struct_row + len(cost_labels) + 1}")
+
+    note_row = struct_row + len(cost_labels) + 22
+    ws_dash[f"B{note_row}"] = (
+        "Источник: листы «Экономика проекта» и «СМР по методике». Диаграммы — с учетом коэфф. выручки/затрат сценария."
+    )
+    ws_dash[f"B{note_row}"].font = Font(name=XL_FONT, size=8, italic=True, color=XL_GRAY)
+
+    ws_dash.page_setup.orientation = "landscape"
+    ws_dash.page_setup.fitToWidth = 1
+    ws_dash.page_setup.fitToHeight = 1
+    ws_dash.sheet_properties.pageSetUpPr.fitToPage = True
+    ws_dash.print_area = f"A1:H{note_row + 2}"
+    ws_dash.page_margins.left = 0.3
+    ws_dash.page_margins.right = 0.3
+    ws_dash.page_margins.top = 0.3
+    ws_dash.page_margins.bottom = 0.3
 
     buffer = io.BytesIO()
     wb.save(buffer)
