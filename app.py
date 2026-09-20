@@ -32,7 +32,9 @@
 
 import base64
 import io
+import json
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -568,15 +570,111 @@ def generate_default_table() -> pd.DataFrame:
 
 
 # ======================================================================
+# 3.5. АВТОСОХРАНЕНИЕ (переживает перезапуск страницы/приложения)
+# ======================================================================
+AUTOSAVE_PATH = Path(__file__).resolve().parent / "talan_model_autosave.json"
+
+# Одиночные DataFrame
+_SAVE_DF_KEYS = ["blocks_df"]
+# Словари {имя блока -> DataFrame}
+_SAVE_DICT_OF_DF_KEYS = [
+    "block_rates", "block_g_area", "block_g_length", "block_z_pct", "block_z_fixed",
+]
+# Простые JSON-совместимые значения (строки/словари чисел/словарь словарей)
+_SAVE_PLAIN_KEYS = [
+    "tep_store", "block_mp_rate", "block_elevator_stops", "design_stage",
+    "project_name_input", "project_city_input", "scenario_select",
+]
+# Динамически именуемые ключи (cascade-хранилища и значения "Блок А" по умолчанию)
+_SAVE_PREFIXES = ("_cascade_", "_price_default_", "_smr_parking_default_", "_mp_korobka_default")
+
+
+def _autosave_collect() -> dict:
+    """Собирает весь пользовательский ввод из session_state в JSON-совместимый словарь."""
+    data = {"df": {}, "dict_of_df": {}, "plain": {}, "prefixed": {}, "indirect_items": {}}
+    for key in _SAVE_DF_KEYS:
+        if key in st.session_state:
+            data["df"][key] = st.session_state[key].to_dict(orient="records")
+    for key in _SAVE_DICT_OF_DF_KEYS:
+        if key in st.session_state:
+            data["dict_of_df"][key] = {
+                name: df.to_dict(orient="records") for name, df in st.session_state[key].items()
+            }
+    for key in _SAVE_PLAIN_KEYS:
+        if key in st.session_state:
+            data["plain"][key] = st.session_state[key]
+    if "indirect_items" in st.session_state:
+        data["indirect_items"] = {
+            name: df.to_dict(orient="records") for name, df in st.session_state.indirect_items.items()
+        }
+    for key in list(st.session_state.keys()):
+        if isinstance(key, str) and key.startswith(_SAVE_PREFIXES):
+            val = st.session_state[key]
+            data["prefixed"][key] = val
+    return data
+
+
+def autosave_write() -> None:
+    """Пишет текущее состояние на диск. Никогда не роняет приложение при ошибке."""
+    try:
+        data = _autosave_collect()
+        AUTOSAVE_PATH.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def autosave_load() -> bool:
+    """Загружает сохраненное состояние в session_state ДО отрисовки виджетов.
+    Возвращает True, если что-то было восстановлено."""
+    if not AUTOSAVE_PATH.exists():
+        return False
+    try:
+        data = json.loads(AUTOSAVE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    try:
+        for key, records in data.get("df", {}).items():
+            if records:
+                st.session_state[key] = pd.DataFrame(records)
+        for key, blocks in data.get("dict_of_df", {}).items():
+            st.session_state[key] = {
+                name: pd.DataFrame(records) if records else pd.DataFrame()
+                for name, records in blocks.items()
+            }
+        for key, val in data.get("plain", {}).items():
+            st.session_state[key] = val
+        indirect = data.get("indirect_items", {})
+        if indirect:
+            st.session_state.indirect_items = {
+                name: pd.DataFrame(records) if records else pd.DataFrame()
+                for name, records in indirect.items()
+            }
+        for key, val in data.get("prefixed", {}).items():
+            st.session_state[key] = val
+        return True
+    except Exception:
+        return False
+
+
+if "_autosave_loaded" not in st.session_state:
+    st.session_state._autosave_loaded = autosave_load()
+
+
+# ======================================================================
 # 4. ПАСПОРТ ПРОЕКТА
 # ======================================================================
 st.title("Финансовая модель девелоперского проекта")
 
+if "project_name_input" not in st.session_state:
+    st.session_state["project_name_input"] = "ЖК «Пример»"
+if "project_city_input" not in st.session_state:
+    st.session_state["project_city_input"] = "Самара"
+
 pass_col1, pass_col2 = st.columns(2)
 with pass_col1:
-    project_name = st.text_input("Наименование проекта", value="ЖК «Пример»")
+    project_name = st.text_input("Наименование проекта", key="project_name_input")
 with pass_col2:
-    project_city = st.text_input("Город", value="Самара")
+    project_city = st.text_input("Город", key="project_city_input")
 
 st.caption("Валовая прибыль и валовая рентабельность. Налоги и кредиты не учитываются.")
 
@@ -655,8 +753,26 @@ if "indirect_items" not in st.session_state:
     st.session_state.indirect_items = {}  # ключ раздела -> DataFrame статей (Наименование, Сумма)
 
 with st.sidebar:
+    if st.session_state.get("_autosave_loaded"):
+        st.caption("💾 Данные восстановлены из автосохранения")
+    else:
+        st.caption("💾 Автосохранение включено")
+    with st.expander("Сбросить проект"):
+        st.caption("Удаляет все введенные данные без возможности восстановления.")
+        confirm_reset = st.checkbox("Подтверждаю сброс", key="_confirm_reset")
+        if st.button("🗑️ Начать новый проект", disabled=not confirm_reset):
+            try:
+                if AUTOSAVE_PATH.exists():
+                    AUTOSAVE_PATH.unlink()
+            except Exception:
+                pass
+            st.session_state.clear()
+            st.rerun()
+
     st.header("Сценарий расчета")
-    scenario_name = st.selectbox("Выберите сценарий", list(SCENARIOS.keys()))
+    if "scenario_select" not in st.session_state or st.session_state["scenario_select"] not in SCENARIOS:
+        st.session_state["scenario_select"] = list(SCENARIOS.keys())[0]
+    scenario_name = st.selectbox("Выберите сценарий", list(SCENARIOS.keys()), key="scenario_select")
     rev_factor = SCENARIOS[scenario_name]["revenue"]
     cost_factor = SCENARIOS[scenario_name]["cost"]
 
@@ -777,10 +893,15 @@ with tab1:
     st.session_state.tep_store = {k: v for k, v in st.session_state.tep_store.items() if k in res_block_names}
     EP_EXTRA_DEFAULTS = {c: 0.0 for c in EXTRA_EP_PARAM_COLS}
     for _i, _name in enumerate(blocks["Название блока"]):
-        if is_res[_i] and _name not in st.session_state.tep_store:
-            st.session_state.tep_store[_name] = {
-                **{tep_col: 0.0 for tep_col in TEP_TO_MAIN_COL}, **EP_EXTRA_DEFAULTS,
-            }
+        if is_res[_i]:
+            _tep_defaults = {**{tep_col: 0.0 for tep_col in TEP_TO_MAIN_COL}, **EP_EXTRA_DEFAULTS}
+            if _name not in st.session_state.tep_store:
+                st.session_state.tep_store[_name] = dict(_tep_defaults)
+            else:
+                # добивает недостающие поля (например, после восстановления
+                # автосохранения старого формата или добавления новых полей ТЭП)
+                for _tep_col, _tep_default in _tep_defaults.items():
+                    st.session_state.tep_store[_name].setdefault(_tep_col, _tep_default)
 
     st.divider()
     st.subheader("Данные ЭП по каждому жилому блоку")
@@ -863,9 +984,11 @@ with tab2:
     price_defaults = {}
     for col_widget, (col_name, label) in zip(price_default_cols, price_labels.items()):
         with col_widget:
+            _pd_key = f"_price_default_{col_name}"
+            if _pd_key not in st.session_state:
+                st.session_state[_pd_key] = 0.0
             price_defaults[col_name] = st.number_input(
-                label, min_value=0.0, step=1000.0, value=0.0,
-                key=f"_price_default_{col_name}",
+                label, min_value=0.0, step=1000.0, key=_pd_key,
             )
 
     price_store = cascade_sync("prices", all_block_names, price_defaults)
@@ -970,8 +1093,11 @@ with tab3:
     parking_defaults = {}
     for col_widget, (col_name, label) in zip(parking_default_cols, parking_rate_labels.items()):
         with col_widget:
+            _spd_key = f"_smr_parking_default_{col_name}"
+            if _spd_key not in st.session_state:
+                st.session_state[_spd_key] = 0.0
             parking_defaults[col_name] = st.number_input(
-                label, min_value=0.0, step=1000.0, value=0.0, key=f"_smr_parking_default_{col_name}",
+                label, min_value=0.0, step=1000.0, key=_spd_key,
             )
     parking_rate_store = cascade_sync("smr_parking", all_block_names, parking_defaults)
     if all_block_names:
@@ -992,9 +1118,11 @@ with tab3:
             "Базовая ставка применяется ко всем жилым блокам, точечно корректируется по "
             "блоку в таблице ОПР ниже (например, для блока со стилобатом)."
         )
+        if "_mp_korobka_default" not in st.session_state:
+            st.session_state["_mp_korobka_default"] = 0.0
         korobka_default = st.number_input(
             "Базовый СМР жилья и коммерции, руб/м2 продаваемой площади (NSA)",
-            min_value=0.0, step=1000.0, value=0.0, key="_mp_korobka_default",
+            min_value=0.0, step=1000.0, key="_mp_korobka_default",
         )
         korobka_store = cascade_sync("mp_korobka", res_block_names, {"Ставка, руб/м2 NSA": korobka_default})
         if res_block_names:
@@ -2368,3 +2496,8 @@ st.download_button(
     file_name=f"financial_model_{scenario_name}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
+
+# ======================================================================
+# АВТОСОХРАНЕНИЕ ТЕКУЩЕГО СОСТОЯНИЯ (в конце каждого rerun)
+# ======================================================================
+autosave_write()
