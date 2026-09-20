@@ -505,6 +505,25 @@ TEP_TO_MAIN_COL = {
 }
 TEP_COLS = list(TEP_TO_MAIN_COL.keys())
 
+# Доп. параметры блока, нужные ТОЛЬКО для ЭП-каталога A-E (базы VOL_BELOW,
+# VOL_ABOVE, AREA_FACADE, AREA_GLAZING_BALCONY) — не входят в методику ТЭП
+# (TEP_TO_MAIN_COL), поэтому редактируются напрямую в таблице блоков, без
+# промежуточного tep_store. Показываются вместе с блоком ТЭП на Вкладке 1.
+EXTRA_EP_PARAM_COLS = [
+    "Объем здания ниже 0, м3", "Объем здания выше 0, м3",
+    "Площадь фасада, м2", "Площадь остекления лоджий, м2",
+]
+
+# Цены продаж — задаются глобально (Блок А) с точечным переопределением по
+# блоку (Блок Б) на Вкладке 2.
+PRICE_COLS = [
+    "Цена жилья, руб/м2", "Цена коммерции, руб/м2", "Цена кладовых, руб/м2",
+    "Цена подземного м/м, руб", "Цена наземного м/м, руб",
+]
+# Ставки СМР паркинга — тоже глобально с переопределением, но на Вкладке 3
+# (нужны в обоих режимах МП/ЭП — паркинг считается вне каталога A-E).
+SMR_PARKING_RATE_COLS = ["Ставка СМР подземного м/м, руб", "Ставка СМР наземного м/м, руб"]
+
 
 # ======================================================================
 # 3. КОЛОНКИ ЕДИНОЙ ТАБЛИЦЫ ТЭП И ТЕСТОВЫЕ ДАННЫЕ
@@ -518,13 +537,24 @@ NUMERIC_COLS = [
 ] + PARAM_COLS  # + 9 доп. параметров для расчета СМР коробки по методике
 ALL_COLS = ["Название блока", "Тип блока"] + NUMERIC_COLS
 
+# Вкладка 1 «Объемы и ТЭП этапов» — единственная таблица с динамическими
+# строками (добавление/удаление урбан-блоков). Только объемные показатели —
+# цены (PRICE_COLS), ставки СМР паркинга (SMR_PARKING_RATE_COLS) и доп.
+# параметры ЭП (PARAM_COLS) вводятся на Вкладках 2/3 и хранятся отдельно
+# (cascade-таблицы / tep_store), а не как колонки этой таблицы.
+MAIN_TABLE_NUMERIC_COLS = [
+    "S квартир, м2", "S коммерции 1 эт., м2", "S кладовых, м2",
+    "Подземный паркинг, м/м", "Наземный/Многоуровневый паркинг, м/м",
+]
+MAIN_TABLE_COLS = ["Название блока", "Тип блока"] + MAIN_TABLE_NUMERIC_COLS
+
 
 def generate_default_table() -> pd.DataFrame:
-    """Пустой шаблон: один жилой урбан-блок («УБ 1») со всеми числовыми ТЭП = 0,
-    готовый для заполнения. Новые блоки добавляются через таблицу (+)."""
-    row = {col: 0.0 for col in NUMERIC_COLS}
+    """Пустой шаблон: один жилой урбан-блок («УБ 1»), готовый для заполнения.
+    Новые блоки добавляются через таблицу (+)."""
+    row = {col: 0.0 for col in MAIN_TABLE_NUMERIC_COLS}
     row.update({"Название блока": "УБ 1", "Тип блока": TYPE_RESIDENTIAL})
-    return pd.DataFrame([row])[ALL_COLS]
+    return pd.DataFrame([row])[MAIN_TABLE_COLS]
 
 
 # ======================================================================
@@ -562,7 +592,7 @@ def render_indirect_category(state_key: str, label: str, default_amount: float) 
             key=f"indirect_editor_{state_key}",
             column_config={
                 "Наименование": st.column_config.TextColumn(),
-                "Сумма, руб": st.column_config.NumberColumn(min_value=0, format="%.0f"),
+                "Сумма, руб": st.column_config.NumberColumn(min_value=0, format="%,d"),
             },
         )
         if len(edited) > MAX_INDIRECT_ITEMS:
@@ -570,6 +600,42 @@ def render_indirect_category(state_key: str, label: str, default_amount: float) 
             edited = edited.iloc[:MAX_INDIRECT_ITEMS].reset_index(drop=True)
         st.session_state.indirect_items[state_key] = edited
     return float(pd.to_numeric(edited["Сумма, руб"], errors="coerce").fillna(0.0).sum())
+
+
+def cascade_sync(store_key: str, block_names: list, col_defaults: dict) -> dict:
+    """Глобальное значение по умолчанию (Блок А) -> точечно редактируемая таблица
+    по блокам (Блок Б). Ячейка обновляется новым дефолтом, только если она еще
+    равна ПРЕДЫДУЩЕМУ дефолту (т.е. пользователь ее вручную не менял). Возвращает
+    dict {имя блока -> {колонка: значение}} — актуальный на блоки block_names."""
+    store = st.session_state.setdefault(f"_cascade_{store_key}", {})
+    prev_defaults = st.session_state.setdefault(f"_cascade_{store_key}_prev", {})
+    for name in block_names:
+        row = store.setdefault(name, {})
+        for col, default_val in col_defaults.items():
+            old_default = prev_defaults.get(col)
+            if col not in row or row[col] == old_default:
+                row[col] = default_val
+    for name in list(store.keys()):
+        if name not in block_names:
+            del store[name]
+    prev_defaults.update(col_defaults)
+    return store
+
+
+def cascade_table_df(store: dict, block_names: list, cols: list) -> pd.DataFrame:
+    """Собирает store (см. cascade_sync) в DataFrame для st.data_editor."""
+    return pd.DataFrame([{"Название блока": n, **{c: store[n][c] for c in cols}} for n in block_names])
+
+
+def cascade_save(store_key: str, edited_df: pd.DataFrame, cols: list) -> None:
+    """Сохраняет отредактированную таблицу обратно в cascade-хранилище (точечные
+    правки пользователя переживают следующий пересчет дефолтов)."""
+    store = st.session_state[f"_cascade_{store_key}"]
+    for _, row in edited_df.iterrows():
+        name = row["Название блока"]
+        if name in store:
+            for col in cols:
+                store[name][col] = float(pd.to_numeric(row[col], errors="coerce") or 0.0)
 
 
 # ======================================================================
@@ -625,30 +691,53 @@ if "design_stage" not in st.session_state:
 if "tep_store" not in st.session_state:
     st.session_state.tep_store = {}  # имя жилого блока -> {поле ТЭП: значение}
 
-tab_main, tab_smr, tab_tep = st.tabs(
-    ["📊 Финансовая модель", "🏗️ СМР по методике", "📋 Исходные данные (ТЭП)"]
+tab1, tab2, tab3 = st.tabs(
+    ["1. Объемы и ТЭП этапов", "2. Коммерческие параметры", "3. Себестоимость СМР"]
 )
 
 # ------------------------------------------------------------------
-# ВКЛАДКА 1: основная таблица ТЭП
+# ВКЛАДКА 1: объемы (7 колонок, динамические строки) + стадия проектирования
+# + доп. параметры ЭП (ТЭП по методике + доп. базы A-E). Единственное место,
+# где можно добавить/удалить урбан-блок — остальные вкладки синхронизируются
+# по «Название блока».
 # ------------------------------------------------------------------
-with tab_main:
-    st.subheader("ТЭП проекта (жилые блоки и блоки-паркинги в одной таблице)")
+with tab1:
+    st.subheader("Стадия проектирования")
+    st.session_state.design_stage = st.radio(
+        "От этого зависит состав полей ввода ниже, на этой вкладке и на "
+        "Вкладке 3 — общий переключатель на весь проект",
+        DESIGN_STAGES,
+        index=DESIGN_STAGES.index(st.session_state.design_stage),
+        horizontal=True,
+        key="design_stage_radio",
+    )
+    is_mp_stage = st.session_state.design_stage == STAGE_MP
     st.caption(
-        "Себестоимость коробки жилого блока считается на вкладке «СМР по методике» — "
-        "здесь задаются площади, цены и доп. параметры для этого расчета. Колонки, "
-        "выделенные на вкладке «Исходные данные» (кол-во квартир, площади и т.п.), "
-        "вводятся там и здесь не редактируются."
+        "МП — детальные площади и объемы блока еще не известны: коробка на Вкладке 3 "
+        "считается одной укрупненной ставкой. ЭП — появляются поля ниже и детальный "
+        "расчет по статьям A-E с индивидуальной базой по каждому блоку."
     )
 
-    tep_linked_cols = set(TEP_TO_MAIN_COL.values())
+    st.divider()
+    st.subheader("Объемы блоков")
+    st.caption(
+        "Цены продаж — на вкладке «2. Коммерческие параметры». Себестоимость СМР, "
+        "наружные работы (G) и прочие затраты (Z) — на вкладке «3. Себестоимость СМР»."
+    )
+
+    tep_linked_cols = set(TEP_TO_MAIN_COL.values()) & set(MAIN_TABLE_COLS)
     column_config = {
         "Название блока": st.column_config.TextColumn(required=True),
         "Тип блока": st.column_config.SelectboxColumn(options=BLOCK_TYPES, required=True),
     }
-    for col in NUMERIC_COLS:
+    for col in MAIN_TABLE_NUMERIC_COLS:
+        is_tep_linked = col in tep_linked_cols
         column_config[col] = st.column_config.NumberColumn(
-            min_value=0, format="%.0f", disabled=(col in tep_linked_cols)
+            min_value=0, format="%,d", disabled=is_tep_linked,
+            help=(
+                "🔒 Вводится ниже, в блоке «Данные ЭП по каждому блоку» — здесь только "
+                "для просмотра, значение подтянется автоматически."
+            ) if is_tep_linked else None,
         )
 
     edited = st.data_editor(
@@ -656,75 +745,140 @@ with tab_main:
         num_rows="dynamic",
         use_container_width=True,
         key="blocks_editor",
+        column_order=MAIN_TABLE_COLS,
         column_config=column_config,
     )
-    st.session_state.blocks_df = edited
+    st.session_state.blocks_df = edited[MAIN_TABLE_COLS].copy()
 
-blocks = edited.copy()
-for col in NUMERIC_COLS:
-    blocks[col] = pd.to_numeric(blocks[col], errors="coerce").fillna(0.0)
-blocks["Название блока"] = blocks["Название блока"].fillna("").astype(str)
-blocks["Тип блока"] = blocks["Тип блока"].fillna(TYPE_RESIDENTIAL)
-blocks = blocks[~((blocks["Название блока"] == "") & (blocks[NUMERIC_COLS].sum(axis=1) == 0))]
-blocks = blocks.reset_index(drop=True)
-N_ROWS = len(blocks)
+    blocks = edited[MAIN_TABLE_COLS].copy()
+    for col in MAIN_TABLE_NUMERIC_COLS:
+        blocks[col] = pd.to_numeric(blocks[col], errors="coerce").fillna(0.0)
+    blocks["Название блока"] = blocks["Название блока"].fillna("").astype(str)
+    blocks["Тип блока"] = blocks["Тип блока"].fillna(TYPE_RESIDENTIAL)
+    blocks = blocks[~((blocks["Название блока"] == "") & (blocks[MAIN_TABLE_NUMERIC_COLS].sum(axis=1) == 0))]
+    blocks = blocks.reset_index(drop=True)
+    N_ROWS = len(blocks)
 
-is_res = (blocks["Тип блока"] == TYPE_RESIDENTIAL)
-is_park = (blocks["Тип блока"] == TYPE_PARKING)
+    is_res = (blocks["Тип блока"] == TYPE_RESIDENTIAL)
+    is_park = (blocks["Тип блока"] == TYPE_PARKING)
 
-# ------------------------------------------------------------------
-# ВКЛАДКА 3: исходные данные (ТЭП) по методике — источник для части
-# параметров жилых блоков (кол-во квартир, площади, площадь участка блока и
-# т.п., ЭП). Площадь участка блока используется в расчете раздела «Наружные
-# работы» (G) на вкладке «СМР по методике» — индивидуально по каждому блоку.
-# ------------------------------------------------------------------
-res_block_names = list(blocks.loc[is_res, "Название блока"])
-st.session_state.tep_store = {k: v for k, v in st.session_state.tep_store.items() if k in res_block_names}
-for _i, _name in enumerate(blocks["Название блока"]):
-    if is_res[_i] and _name not in st.session_state.tep_store:
-        st.session_state.tep_store[_name] = {
-            tep_col: float(blocks.at[_i, main_col]) for tep_col, main_col in TEP_TO_MAIN_COL.items()
-        }
+    res_block_names = list(blocks.loc[is_res, "Название блока"])
+    st.session_state.tep_store = {k: v for k, v in st.session_state.tep_store.items() if k in res_block_names}
+    EP_EXTRA_DEFAULTS = {c: 0.0 for c in EXTRA_EP_PARAM_COLS}
+    for _i, _name in enumerate(blocks["Название блока"]):
+        if is_res[_i] and _name not in st.session_state.tep_store:
+            st.session_state.tep_store[_name] = {
+                **{tep_col: 0.0 for tep_col in TEP_TO_MAIN_COL}, **EP_EXTRA_DEFAULTS,
+            }
 
-with tab_tep:
-    st.subheader("Исходные данные по эскизному проекту (ЭП) — по каждому жилому блоку")
-    st.caption(
-        "Значения передаются в таблицу блоков на вкладке «Финансовая модель» (там эти "
-        "колонки нередактируемые) и используются в расчете себестоимости коробки. Остальные "
-        "параметры блока (цены, паркинг, объемы, фасад, лоджии) по-прежнему задаются на "
-        "вкладке «Финансовая модель»."
-    )
+    st.divider()
+    st.subheader("Данные ЭП по каждому жилому блоку")
     if res_block_names:
-        tep_df_view = pd.DataFrame(
-            [{"Название блока": name, **st.session_state.tep_store[name]} for name in res_block_names]
-        )
-        tep_column_config = {"Название блока": st.column_config.TextColumn(disabled=True)}
-        for _col in TEP_COLS:
-            tep_column_config[_col] = st.column_config.NumberColumn(min_value=0, format="%.0f")
-        tep_edited = st.data_editor(
-            tep_df_view,
+        if is_mp_stage:
+            st.caption(
+                "На этапе МП нужна только площадь участка блока (база для наружных работ "
+                "G) — остальные поля ЭП появятся при переключении стадии выше."
+            )
+            ep_cols_to_show = ["Площадь участка блока, га"]
+        else:
+            st.caption(
+                "Передаются в таблицу объемов выше (там эти колонки нередактируемые) и "
+                "используются в расчете себестоимости коробки по статьям A-E (Вкладка 3)."
+            )
+            ep_cols_to_show = TEP_COLS + EXTRA_EP_PARAM_COLS
+
+        ep_df_view = pd.DataFrame([
+            {"Название блока": name, **st.session_state.tep_store[name]}
+            for name in res_block_names
+        ])
+        ep_column_config = {"Название блока": st.column_config.TextColumn(disabled=True)}
+        for _col in ep_cols_to_show:
+            ep_column_config[_col] = st.column_config.NumberColumn(min_value=0, format="%,d")
+        ep_edited = st.data_editor(
+            ep_df_view,
             use_container_width=True,
             num_rows="fixed",
-            key="tep_editor",
-            column_config=tep_column_config,
+            key="ep_editor",
+            column_order=["Название блока"] + ep_cols_to_show,
+            column_config=ep_column_config,
         )
-        for _, _row in tep_edited.iterrows():
-            st.session_state.tep_store[_row["Название блока"]] = {
-                col: float(pd.to_numeric(_row[col], errors="coerce") or 0.0) for col in TEP_COLS
-            }
+        for _, _row in ep_edited.iterrows():
+            _name = _row["Название блока"]
+            for col in ep_cols_to_show:
+                st.session_state.tep_store[_name][col] = float(pd.to_numeric(_row[col], errors="coerce") or 0.0)
     else:
-        st.info("Добавьте хотя бы один «Жилой блок» на вкладке «Финансовая модель», чтобы ввести данные ЭП.")
+        st.info("Добавьте хотя бы один «Жилой блок» в таблице объемов выше, чтобы ввести данные ЭП.")
 
-# Данные ЭП — источник истины для соответствующих колонок таблицы блоков
+# Данные ЭП — источник истины для соответствующих колонок таблицы блоков.
+# Площадь участка блока (и, на ЭП, остальные поля) пишутся в `blocks` независимо
+# от стадии — при переключении МП/ЭП уже введенные значения не теряются.
+for col in EXTRA_EP_PARAM_COLS + PARAM_COLS:
+    if col not in blocks.columns:
+        blocks[col] = 0.0
 for _i, _name in enumerate(blocks["Название блока"]):
     if is_res[_i] and _name in st.session_state.tep_store:
+        store_row = st.session_state.tep_store[_name]
         for tep_col, main_col in TEP_TO_MAIN_COL.items():
-            blocks.at[_i, main_col] = st.session_state.tep_store[_name][tep_col]
-st.session_state.blocks_df = blocks[ALL_COLS].copy()
+            blocks.at[_i, main_col] = store_row[tep_col]
+        for col in EXTRA_EP_PARAM_COLS:
+            blocks.at[_i, col] = store_row[col]
 
 # NSA нужна и для аллокации, и как база нескольких статей методики
 nsa = np.where(is_res, blocks["S квартир, м2"] + blocks["S коммерции 1 эт., м2"] + blocks["S кладовых, м2"], 0.0)
 blocks["NSA, м2"] = nsa
+
+# ------------------------------------------------------------------
+# ВКЛАДКА 2: коммерческие параметры (цены продаж) — Блок А (глобальные цены)
+# + Блок Б (таблица по блокам с точечным переопределением).
+# ------------------------------------------------------------------
+all_block_names = list(blocks["Название блока"])
+with tab2:
+    st.subheader("Базовые цены (применяются ко всем блокам)")
+    price_labels = {
+        "Цена жилья, руб/м2": "Базовая цена жилья, руб/м2",
+        "Цена коммерции, руб/м2": "Базовая цена коммерции, руб/м2",
+        "Цена кладовых, руб/м2": "Базовая цена кладовых, руб/м2",
+        "Цена подземного м/м, руб": "Базовая цена подземного м/м, руб",
+        "Цена наземного м/м, руб": "Базовая цена наземного м/м, руб",
+    }
+    price_default_cols = st.columns(5)
+    price_defaults = {}
+    for col_widget, (col_name, label) in zip(price_default_cols, price_labels.items()):
+        with col_widget:
+            price_defaults[col_name] = st.number_input(
+                label, min_value=0.0, step=1000.0, value=0.0,
+                key=f"_price_default_{col_name}",
+            )
+
+    price_store = cascade_sync("prices", all_block_names, price_defaults)
+
+    st.divider()
+    st.subheader("Цены по блокам (точечная корректировка)")
+    st.caption(
+        "Заполняются базовыми ценами выше автоматически. Если переписать цену вручную "
+        "для конкретного блока — при последующем изменении базовой цены эта ячейка "
+        "сохранит свое значение."
+    )
+    if all_block_names:
+        price_df = cascade_table_df(price_store, all_block_names, PRICE_COLS)
+        price_column_config = {"Название блока": st.column_config.TextColumn(disabled=True)}
+        for col in PRICE_COLS:
+            price_column_config[col] = st.column_config.NumberColumn(format="%,d")
+        price_edited = st.data_editor(
+            price_df, use_container_width=True, num_rows="fixed",
+            key="price_editor", column_config=price_column_config,
+        )
+        cascade_save("prices", price_edited, PRICE_COLS)
+    else:
+        st.info("Добавьте хотя бы один блок на Вкладке 1, чтобы задать цены.")
+
+for col in PRICE_COLS:
+    if col not in blocks.columns:
+        blocks[col] = 0.0
+for _name in all_block_names:
+    _i = blocks.index[blocks["Название блока"] == _name][0]
+    for col in PRICE_COLS:
+        blocks.at[_i, col] = price_store[_name][col]
 
 # ------------------------------------------------------------------
 # ВКЛАДКА 2: каталог расценок (ИНДИВИДУАЛЬНО по каждому жилому блоку) +
@@ -781,26 +935,63 @@ for _idx, _name in enumerate(res_block_names):
     if _name not in st.session_state.block_elevator_stops:
         st.session_state.block_elevator_stops[_name] = st.session_state.block_elevator_stops.get(_prev, 0.0)
 
-with tab_smr:
-    st.subheader("Стадия проектирования")
-    st.session_state.design_stage = st.radio(
-        "От этого зависит, как считается себестоимость коробки (статьи A-E) — общий "
-        "переключатель на весь проект",
-        DESIGN_STAGES,
-        index=DESIGN_STAGES.index(st.session_state.design_stage),
-        horizontal=True,
-        key="design_stage_radio",
-    )
+with tab3:
     is_mp_stage = st.session_state.design_stage == STAGE_MP
-    st.caption(
-        "МП — детальные площади и объемы блока для расчета по 32 статьям методики еще не "
-        "известны: коробка считается одной укрупненной ставкой руб/м2 NSA. ЭП — детальный "
-        "расчет по статьям A-E с индивидуальной базой и ставкой по каждому блоку. Наружные "
-        "работы (G) и прочие затраты СМР (Z) считаются одинаково на обеих стадиях."
-    )
+    st.caption(f"Активная стадия проектирования: **{st.session_state.design_stage}** (переключается на Вкладке 1).")
 
+    st.subheader("Ставки СМР паркинга (для всех блоков)")
+    st.caption(
+        "Нужны на любой стадии — паркинг считается вне каталога A-E. Задайте базовые "
+        "ставки, при необходимости скорректируйте точечно по блокам ниже."
+    )
+    parking_rate_labels = {
+        "Ставка СМР подземного м/м, руб": "Базовый СМР подземного паркинга, руб/1 м/м",
+        "Ставка СМР наземного м/м, руб": "Базовый СМР отдельно стоящего паркинга, руб/1 м/м",
+    }
+    parking_default_cols = st.columns(2)
+    parking_defaults = {}
+    for col_widget, (col_name, label) in zip(parking_default_cols, parking_rate_labels.items()):
+        with col_widget:
+            parking_defaults[col_name] = st.number_input(
+                label, min_value=0.0, step=1000.0, value=0.0, key=f"_smr_parking_default_{col_name}",
+            )
+    parking_rate_store = cascade_sync("smr_parking", all_block_names, parking_defaults)
+    if all_block_names:
+        parking_rate_df = cascade_table_df(parking_rate_store, all_block_names, SMR_PARKING_RATE_COLS)
+        parking_rate_column_config = {"Название блока": st.column_config.TextColumn(disabled=True)}
+        for col in SMR_PARKING_RATE_COLS:
+            parking_rate_column_config[col] = st.column_config.NumberColumn(format="%,d")
+        parking_rate_edited = st.data_editor(
+            parking_rate_df, use_container_width=True, num_rows="fixed",
+            key="parking_rate_editor", column_config=parking_rate_column_config,
+        )
+        cascade_save("smr_parking", parking_rate_edited, SMR_PARKING_RATE_COLS)
+
+    st.divider()
     if is_mp_stage:
-        st.subheader("Себестоимость коробки — индивидуально по каждому урбан-блоку (МП)")
+        st.subheader("Себестоимость коробки — укрупненно (МП)")
+        st.caption(
+            "Базовая ставка применяется ко всем жилым блокам, точечно корректируется по "
+            "блоку в таблице ОПР ниже (например, для блока со стилобатом)."
+        )
+        korobka_default = st.number_input(
+            "Базовый СМР жилья и коммерции, руб/м2 продаваемой площади (NSA)",
+            min_value=0.0, step=1000.0, value=0.0, key="_mp_korobka_default",
+        )
+        korobka_store = cascade_sync("mp_korobka", res_block_names, {"Ставка, руб/м2 NSA": korobka_default})
+        if res_block_names:
+            korobka_df = cascade_table_df(korobka_store, res_block_names, ["Ставка, руб/м2 NSA"])
+            korobka_edited = st.data_editor(
+                korobka_df, use_container_width=True, num_rows="fixed",
+                key="mp_korobka_editor",
+                column_config={
+                    "Название блока": st.column_config.TextColumn(disabled=True),
+                    "Ставка, руб/м2 NSA": st.column_config.NumberColumn(format="%,d"),
+                },
+            )
+            cascade_save("mp_korobka", korobka_edited, ["Ставка, руб/м2 NSA"])
+            for _name in res_block_names:
+                st.session_state.block_mp_rate[_name] = korobka_store[_name]["Ставка, руб/м2 NSA"]
     else:
         st.subheader("Ставки СМР по видам работ — индивидуально по каждому урбан-блоку (ЭП)")
         st.caption(
@@ -811,18 +1002,15 @@ with tab_smr:
             "Названия блоков должны быть уникальны, иначе ставки будут общими на все блоки с "
             "одинаковым названием."
         )
+
+    st.divider()
     if res_block_names:
         selected_block = st.selectbox("Урбан-блок", res_block_names, key="smr_block_selector")
 
         if is_mp_stage:
             current_nsa = float(blocks.loc[blocks["Название блока"] == selected_block, "NSA, м2"].iloc[0])
+            mp_rate_val = float(korobka_store[selected_block]["Ставка, руб/м2 NSA"])
             st.caption(f"NSA блока «{selected_block}»: {current_nsa:,.0f} м2".replace(",", " "))
-            mp_rate_val = st.number_input(
-                "Ставка коробки, руб/м2 NSA", min_value=0.0,
-                value=float(st.session_state.block_mp_rate[selected_block]), step=1000.0,
-                key=f"mp_rate_input_{selected_block}",
-            )
-            st.session_state.block_mp_rate[selected_block] = mp_rate_val
             st.metric("Себестоимость коробки блока (МП)", f"{current_nsa * mp_rate_val:,.0f} руб".replace(",", " "))
         else:
             block_rates_edited = st.data_editor(
@@ -836,7 +1024,7 @@ with tab_smr:
                     "Группа": st.column_config.TextColumn(disabled=True),
                     "Единица измерения": st.column_config.TextColumn(disabled=True),
                     "_basis": None,  # служебная колонка — скрыта
-                    "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%.0f"),
+                    "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%,d"),
                 },
             )
             st.session_state.block_rates[selected_block] = block_rates_edited
@@ -869,7 +1057,7 @@ with tab_smr:
                 "Код": st.column_config.TextColumn(disabled=True),
                 "Статья затрат": st.column_config.TextColumn(disabled=True),
                 "Единица измерения": st.column_config.TextColumn(disabled=True),
-                "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%.0f"),
+                "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%,d"),
             },
         )
         st.session_state.block_g_area[selected_block] = g_area_edited
@@ -885,7 +1073,7 @@ with tab_smr:
                 "Статья затрат": st.column_config.TextColumn(disabled=True),
                 "Единица измерения": st.column_config.TextColumn(disabled=True),
                 "Кол-во": st.column_config.NumberColumn(min_value=0, format="%.1f"),
-                "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%.0f"),
+                "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%,d"),
             },
         )
         st.session_state.block_g_length[selected_block] = g_length_edited
@@ -920,12 +1108,20 @@ with tab_smr:
             column_config={
                 "Код": st.column_config.TextColumn(disabled=True),
                 "Статья затрат": st.column_config.TextColumn(disabled=True),
-                "Сумма, руб": st.column_config.NumberColumn(min_value=0, format="%.0f"),
+                "Сумма, руб": st.column_config.NumberColumn(min_value=0, format="%,d"),
             },
         )
         st.session_state.block_z_fixed[selected_block] = z_fixed_edited
     else:
-        st.info("Добавьте хотя бы один «Жилой блок» на вкладке «Финансовая модель», чтобы задать ставки СМР.")
+        st.info("Добавьте хотя бы один «Жилой блок» на Вкладке 1, чтобы задать ставки СМР.")
+
+for col in SMR_PARKING_RATE_COLS:
+    if col not in blocks.columns:
+        blocks[col] = 0.0
+for _name in all_block_names:
+    _i = blocks.index[blocks["Название блока"] == _name][0]
+    for col in SMR_PARKING_RATE_COLS:
+        blocks.at[_i, col] = parking_rate_store[_name][col]
 
 # -- Расчет себестоимости коробки по методике: у КАЖДОГО блока — свой каталог ставок --
 # ELEVATOR_STOPS (кол-во остановок, статья D.10.10) — не колонка таблицы блоков, а
@@ -958,10 +1154,11 @@ if is_mp_stage:
     ])
 else:
     smr_korobka_raw = np.sum(list(item_cost_matrix.values()), axis=0) if item_cost_matrix and N_ROWS > 0 else np.zeros(N_ROWS)
-blocks["Себестоимость коробки (методика)"] = smr_korobka_raw
-blocks["Эффективная ставка коробки, руб/м2"] = np.where(nsa > 0, smr_korobka_raw / np.where(nsa > 0, nsa, 1), 0.0)
+smr_korobka_scaled = smr_korobka_raw * cost_factor  # для отображения и сведения с "Прямые затраты"
+blocks["Себестоимость коробки (методика)"] = smr_korobka_scaled
+blocks["Эффективная ставка коробки, руб/м2"] = np.where(nsa > 0, smr_korobka_scaled / np.where(nsa > 0, nsa, 1), 0.0)
 
-with tab_smr:
+with tab3:
     st.markdown("**Себестоимость коробки по блокам**" + ("" if not is_mp_stage else " (МП: NSA x ставка руб/м2)"))
     smr_result_df = pd.DataFrame({
         "Название блока": blocks["Название блока"],
@@ -973,8 +1170,8 @@ with tab_smr:
     st.dataframe(
         smr_result_df, use_container_width=True,
         column_config={
-            "Себестоимость коробки, руб": st.column_config.NumberColumn(format="%.0f"),
-            "Эффективная ставка, руб/м2": st.column_config.NumberColumn(format="%.0f"),
+            "Себестоимость коробки, руб": st.column_config.NumberColumn(format="%,d"),
+            "Эффективная ставка, руб/м2": st.column_config.NumberColumn(format="%,d"),
         },
     )
 
@@ -1011,6 +1208,10 @@ with tab_smr:
             st.plotly_chart(fig_group_pie, use_container_width=True)
 
         with st.expander("Детализация по каждой статье и блоку"):
+            st.caption(
+                "Значения по статьям — на базовых ставках (без коэффициента сценария). "
+                "Итог «Себестоимость коробки» выше показан со сценарием."
+            )
             detail_df = pd.DataFrame(item_cost_matrix, index=blocks["Название блока"]).T
             detail_df.insert(0, "Статья затрат", [code_to_name[c] for c in detail_df.index])
             st.dataframe(detail_df, use_container_width=True)
@@ -1061,20 +1262,25 @@ for i in range(N_ROWS):
     z_pct_total[i] = zg_base[i] * z_pct_rate_sum
 
 z_block_total = z_pct_total + z_fixed_total
-blocks["Наружные работы блока (G), руб"] = g_block_total
-blocks["Прочие затраты блока (Z), руб"] = z_block_total
+# Для отображения и сведения с "Прямые затраты" — сумма G и Z со сценарием.
+# База для % статей Z (zg_base выше) остается на базовых ставках — это не
+# меняет итог, т.к. коэффициент сценария линейно выносится за скобки.
+g_block_total_scaled = g_block_total * cost_factor
+z_block_total_scaled = z_block_total * cost_factor
+blocks["Наружные работы блока (G), руб"] = g_block_total_scaled
+blocks["Прочие затраты блока (Z), руб"] = z_block_total_scaled
 
-with tab_smr:
+with tab3:
     st.divider()
     if res_block_names:
         sel_idx = blocks.index[blocks["Название блока"] == selected_block][0]
         st.subheader(f"Итого G и Z — блок «{selected_block}»")
         gz_m1, gz_m2 = st.columns(2)
-        gz_m1.metric("Наружные работы блока (G)", f"{g_block_total[sel_idx]:,.0f} руб".replace(",", " "))
-        gz_m2.metric("Прочие затраты блока (Z)", f"{z_block_total[sel_idx]:,.0f} руб".replace(",", " "))
+        gz_m1.metric("Наружные работы блока (G)", f"{g_block_total_scaled[sel_idx]:,.0f} руб".replace(",", " "))
+        gz_m2.metric("Прочие затраты блока (Z)", f"{z_block_total_scaled[sel_idx]:,.0f} руб".replace(",", " "))
         st.caption(
-            f"База для % статей Z этого блока (СМР коробки + G блока + подземный паркинг блока): "
-            f"{zg_base[sel_idx]:,.0f} руб".replace(",", " ")
+            f"База для % статей Z этого блока (СМР коробки + G блока + подземный паркинг блока, "
+            f"на базовых ставках): {zg_base[sel_idx]:,.0f} руб".replace(",", " ")
         )
 
     st.markdown("**Наружные работы (G) и прочие затраты (Z) по всем жилым блокам**")
@@ -1087,8 +1293,8 @@ with tab_smr:
     st.dataframe(
         gz_table, use_container_width=True,
         column_config={
-            "Наружные работы блока (G), руб": st.column_config.NumberColumn(format="%.0f"),
-            "Прочие затраты блока (Z), руб": st.column_config.NumberColumn(format="%.0f"),
+            "Наружные работы блока (G), руб": st.column_config.NumberColumn(format="%,d"),
+            "Прочие затраты блока (Z), руб": st.column_config.NumberColumn(format="%,d"),
         },
     )
 
@@ -1109,10 +1315,13 @@ blocks["Аллоцированные затраты"] = blocks["Доля алл�
 # Прямые затраты: жилой блок = себестоимость коробки (по методике) + наружные
 # работы блока (G) + прочие затраты блока (Z) + подземный паркинг блока;
 # блок-паркинг = наземный/многоуровневый паркинг по своей ставке.
+# Коробка/G/Z берутся уже со сценарием (см. выше) — это гарантирует, что
+# видимые слагаемые в таблицах сходятся с "Прямые затраты" в любом сценарии.
 direct_res = (
-    smr_korobka_raw + g_block_total + z_block_total
-    + blocks["Подземный паркинг, м/м"] * blocks["Ставка СМР подземного м/м, руб"]
-) * cost_factor
+    blocks["Себестоимость коробки (методика)"] + blocks["Наружные работы блока (G), руб"]
+    + blocks["Прочие затраты блока (Z), руб"]
+    + blocks["Подземный паркинг, м/м"] * blocks["Ставка СМР подземного м/м, руб"] * cost_factor
+)
 direct_park = blocks["Наземный/Многоуровневый паркинг, м/м"] * blocks["Ставка СМР наземного м/м, руб"] * cost_factor
 blocks["Прямые затраты"] = np.where(is_res, direct_res, direct_park)
 
@@ -1151,86 +1360,86 @@ avg_margin = (total_profit / total_revenue) if total_revenue > 0 else 0.0
 no_residential_warning = (blocks.shape[0] > 0) and (total_nsa == 0) and (indirect_pool_total > 0)
 
 # ======================================================================
-# 9. ВЕБ-ИНТЕРФЕЙС (вкладка 1) — МЕТРИКИ И ИНТЕРАКТИВНАЯ ГРАФИКА
+# 9. ОБЩИЙ БЛОК ПОД ВКЛАДКАМИ — ИТОГОВЫЕ МЕТРИКИ И ИНТЕРАКТИВНАЯ ГРАФИКА
+# (виден всегда, не привязан ни к одной из 3 вкладок ввода)
 # ======================================================================
-with tab_main:
-    st.divider()
-    st.subheader(f"«{project_name}», {project_city} — сценарий «{scenario_name}»")
+st.divider()
+st.subheader(f"«{project_name}», {project_city} — сценарий «{scenario_name}»")
 
-    if no_residential_warning:
-        st.warning(
-            "В таблице нет ни одного «Жилого блока» — пул косвенных расходов не на что "
-            "распределить, поэтому он не учтен в итогах проекта."
-        )
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Выручка проекта", f"{total_revenue:,.0f} руб".replace(",", " "))
-    m2.metric("Затраты проекта", f"{total_cost:,.0f} руб".replace(",", " "))
-    m3.metric("Валовая прибыль", f"{total_profit:,.0f} руб".replace(",", " "))
-    m4.metric("Средняя рентабельность", f"{avg_margin * 100:.1f} %")
-
-    st.markdown("**Экономика проекта по блокам**")
-    tbl_cols = [
-        "Название блока", "Тип блока", "NSA, м2", "Доля аллокации",
-        "Прямые затраты", "Аллоцированные затраты", "Полные затраты",
-        "Выручка", "Валовая прибыль", "Рентабельность",
-    ]
-    st.dataframe(
-        blocks[tbl_cols], use_container_width=True,
-        column_config={
-            "Доля аллокации": st.column_config.NumberColumn(format="percent"),
-            "Рентабельность": st.column_config.NumberColumn(format="percent"),
-            "Прямые затраты": st.column_config.NumberColumn(format="%.0f"),
-            "Аллоцированные затраты": st.column_config.NumberColumn(format="%.0f"),
-            "Полные затраты": st.column_config.NumberColumn(format="%.0f"),
-            "Выручка": st.column_config.NumberColumn(format="%.0f"),
-            "Валовая прибыль": st.column_config.NumberColumn(format="%.0f"),
-        },
+if no_residential_warning:
+    st.warning(
+        "В таблице нет ни одного «Жилого блока» — пул косвенных расходов не на что "
+        "распределить, поэтому он не учтен в итогах проекта."
     )
 
-    chart_col1, chart_col2 = st.columns(2)
-    with chart_col1:
-        fig_rev_cost = go.Figure()
-        fig_rev_cost.add_bar(name="Выручка", x=blocks["Название блока"], y=blocks["Выручка"], marker_color=f"#{COLOR_REVENUE}")
-        fig_rev_cost.add_bar(name="Полные затраты", x=blocks["Название блока"], y=blocks["Полные затраты"], marker_color=f"#{COLOR_COST}")
-        fig_rev_cost.update_layout(
-            title="Выручка vs Затраты по блокам", barmode="group",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0), margin=dict(t=60, b=40),
-        )
-        st.plotly_chart(fig_rev_cost, use_container_width=True)
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Выручка проекта", f"{total_revenue:,.0f} руб".replace(",", " "))
+m2.metric("Затраты проекта", f"{total_cost:,.0f} руб".replace(",", " "))
+m3.metric("Валовая прибыль", f"{total_profit:,.0f} руб".replace(",", " "))
+m4.metric("Средняя рентабельность", f"{avg_margin * 100:.1f} %")
 
-    with chart_col2:
-        margin_colors = [f"#{COLOR_POSITIVE}" if v >= 0 else f"#{COLOR_NEGATIVE}" for v in blocks["Рентабельность"]]
-        fig_margin = go.Figure(
-            go.Bar(
-                x=blocks["Название блока"], y=blocks["Рентабельность"] * 100, marker_color=margin_colors,
-                text=[f"{v * 100:.1f}%" for v in blocks["Рентабельность"]], textposition="outside",
-            )
-        )
-        fig_margin.update_layout(title="Валовая рентабельность по блокам, %", yaxis_title="%", margin=dict(t=60, b=40))
-        fig_margin.add_hline(y=0, line_color="#898781", line_width=1)
-        st.plotly_chart(fig_margin, use_container_width=True)
+st.markdown("**Экономика проекта по блокам**")
+tbl_cols = [
+    "Название блока", "Тип блока", "NSA, м2", "Доля аллокации",
+    "Прямые затраты", "Аллоцированные затраты", "Полные затраты",
+    "Выручка", "Валовая прибыль", "Рентабельность",
+]
+st.dataframe(
+    blocks[tbl_cols], use_container_width=True,
+    column_config={
+        "Доля аллокации": st.column_config.NumberColumn(format="percent"),
+        "Рентабельность": st.column_config.NumberColumn(format="percent"),
+        "Прямые затраты": st.column_config.NumberColumn(format="%,d"),
+        "Аллоцированные затраты": st.column_config.NumberColumn(format="%,d"),
+        "Полные затраты": st.column_config.NumberColumn(format="%,d"),
+        "Выручка": st.column_config.NumberColumn(format="%,d"),
+        "Валовая прибыль": st.column_config.NumberColumn(format="%,d"),
+    },
+)
 
-    chart_col3, chart_col4 = st.columns(2)
-    with chart_col3:
-        fig_pie = go.Figure(
-            go.Pie(
-                labels=list(revenue_components.keys()), values=list(revenue_components.values()),
-                marker=dict(colors=[f"#{c}" for c in PIE_COLORS]), hole=0.35,
-            )
-        )
-        fig_pie.update_layout(title="Структура выручки проекта (Итого)", margin=dict(t=60, b=20))
-        st.plotly_chart(fig_pie, use_container_width=True)
+chart_col1, chart_col2 = st.columns(2)
+with chart_col1:
+    fig_rev_cost = go.Figure()
+    fig_rev_cost.add_bar(name="Выручка", x=blocks["Название блока"], y=blocks["Выручка"], marker_color=f"#{COLOR_REVENUE}")
+    fig_rev_cost.add_bar(name="Полные затраты", x=blocks["Название блока"], y=blocks["Полные затраты"], marker_color=f"#{COLOR_COST}")
+    fig_rev_cost.update_layout(
+        title="Выручка vs Затраты по блокам", barmode="group",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0), margin=dict(t=60, b=40),
+    )
+    st.plotly_chart(fig_rev_cost, use_container_width=True)
 
-    with chart_col4:
-        fig_cost_structure = go.Figure()
-        fig_cost_structure.add_bar(name="Прямые затраты", x=blocks["Название блока"], y=blocks["Прямые затраты"], marker_color=f"#{COLOR_DIRECT_COST}")
-        fig_cost_structure.add_bar(name="Аллоцированные затраты", x=blocks["Название блока"], y=blocks["Аллоцированные затраты"], marker_color=f"#{COLOR_ALLOC_COST}")
-        fig_cost_structure.update_layout(
-            title="Структура затрат по блокам", barmode="stack",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0), margin=dict(t=60, b=40),
+with chart_col2:
+    margin_colors = [f"#{COLOR_POSITIVE}" if v >= 0 else f"#{COLOR_NEGATIVE}" for v in blocks["Рентабельность"]]
+    fig_margin = go.Figure(
+        go.Bar(
+            x=blocks["Название блока"], y=blocks["Рентабельность"] * 100, marker_color=margin_colors,
+            text=[f"{v * 100:.1f}%" for v in blocks["Рентабельность"]], textposition="outside",
         )
-        st.plotly_chart(fig_cost_structure, use_container_width=True)
+    )
+    fig_margin.update_layout(title="Валовая рентабельность по блокам, %", yaxis_title="%", margin=dict(t=60, b=40))
+    fig_margin.add_hline(y=0, line_color="#898781", line_width=1)
+    st.plotly_chart(fig_margin, use_container_width=True)
+
+chart_col3, chart_col4 = st.columns(2)
+with chart_col3:
+    fig_pie = go.Figure(
+        go.Pie(
+            labels=list(revenue_components.keys()), values=list(revenue_components.values()),
+            marker=dict(colors=[f"#{c}" for c in PIE_COLORS]), hole=0.35,
+        )
+    )
+    fig_pie.update_layout(title="Структура выручки проекта (Итого)", margin=dict(t=60, b=20))
+    st.plotly_chart(fig_pie, use_container_width=True)
+
+with chart_col4:
+    fig_cost_structure = go.Figure()
+    fig_cost_structure.add_bar(name="Прямые затраты", x=blocks["Название блока"], y=blocks["Прямые затраты"], marker_color=f"#{COLOR_DIRECT_COST}")
+    fig_cost_structure.add_bar(name="Аллоцированные затраты", x=blocks["Название блока"], y=blocks["Аллоцированные затраты"], marker_color=f"#{COLOR_ALLOC_COST}")
+    fig_cost_structure.update_layout(
+        title="Структура затрат по блокам", barmode="stack",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0), margin=dict(t=60, b=40),
+    )
+    st.plotly_chart(fig_cost_structure, use_container_width=True)
 
 # ======================================================================
 # 10. ЭКСПОРТ В EXCEL (openpyxl) — ЖИВЫЕ ФОРМУЛЫ, 2 ЛИСТА, ВСТРОЕННЫЕ ГРАФИКИ
@@ -1367,7 +1576,7 @@ def build_excel_report() -> bytes:
             style_cell(ws2.cell(row=r2, column=3, value=f"={nsa_ref}"), number_format=MONEY_FMT, fill=row_fill)
             rate_val = float(st.session_state.block_mp_rate.get(block_name, 0.0)) if row["Тип блока"] == TYPE_RESIDENTIAL else 0.0
             style_cell(ws2.cell(row=r2, column=4, value=rate_val), number_format=MONEY_FMT, fill=row_fill)
-            total_cell = ws2.cell(row=r2, column=total_col_idx2, value=f"=C{r2}*D{r2}")
+            total_cell = ws2.cell(row=r2, column=total_col_idx2, value=f"=C{r2}*D{r2}*'{SHEET1_NAME}'!$E$4")
             style_cell(total_cell, number_format=MONEY_MM_FMT, bold=True, fill=TOTAL_FILL)
         calc_last_row = calc_first_row + N_ROWS - 1
 
@@ -1480,7 +1689,7 @@ def build_excel_report() -> bytes:
 
             first_item_col = get_column_letter(3)
             last_item_col = get_column_letter(2 + len(item_codes))
-            total_cell = ws2.cell(row=r2, column=total_col_idx2, value=f"=SUM({first_item_col}{r2}:{last_item_col}{r2})")
+            total_cell = ws2.cell(row=r2, column=total_col_idx2, value=f"=SUM({first_item_col}{r2}:{last_item_col}{r2})*'{SHEET1_NAME}'!$E$4")
             style_cell(total_cell, number_format=MONEY_MM_FMT, bold=True, fill=TOTAL_FILL)
         calc_last_row = calc_first_row + N_ROWS - 1
 
@@ -1748,6 +1957,7 @@ def build_excel_report() -> bytes:
         g_area_rate_col = rate_col_for_g_area.get(block_name)
         g_area_formula = (
             f"={plot_area_ref}*SUM({g_area_rate_col}{g_area_first_row}:{g_area_rate_col}{g_area_last_row})"
+            f"*'{SHEET1_NAME}'!$E$4"
             if g_area_rate_col is not None else 0
         )
         style_cell(ws2.cell(row=r, column=GZ_COL_GAREA, value=g_area_formula), number_format=MONEY_FMT, fill=row_fill)
@@ -1756,6 +1966,7 @@ def build_excel_report() -> bytes:
         g_length_formula = (
             f"=SUMPRODUCT({qty_col}{g_length_first_row}:{qty_col}{g_length_last_row},"
             f"{rate_col}{g_length_first_row}:{rate_col}{g_length_last_row})"
+            f"*'{SHEET1_NAME}'!$E$4"
             if qty_col is not None else 0
         )
         style_cell(ws2.cell(row=r, column=GZ_COL_GLEN, value=g_length_formula), number_format=MONEY_FMT, fill=row_fill)
@@ -1771,6 +1982,7 @@ def build_excel_report() -> bytes:
         parking_formula = (
             f"='{SHEET1_NAME}'!{COL['Подземный паркинг, м/м']}{r1}"
             f"*'{SHEET1_NAME}'!{COL['Ставка СМР подземного м/м, руб']}{r1}"
+            f"*'{SHEET1_NAME}'!$E$4"
         )
         style_cell(ws2.cell(row=r, column=GZ_COL_PARKING, value=parking_formula), number_format=MONEY_FMT, fill=row_fill)
 
@@ -1790,6 +2002,7 @@ def build_excel_report() -> bytes:
         z_fixed_col = sum_col_for_z_fixed.get(block_name)
         z_fixed_formula = (
             f"=SUM({z_fixed_col}{z_fixed_first_row}:{z_fixed_col}{z_fixed_last_row})"
+            f"*'{SHEET1_NAME}'!$E$4"
             if z_fixed_col is not None else 0
         )
         style_cell(ws2.cell(row=r, column=GZ_COL_ZFIXED, value=z_fixed_formula), number_format=MONEY_FMT, fill=row_fill)
@@ -1829,9 +2042,9 @@ def build_excel_report() -> bytes:
         f_z = f"='{SHEET2_NAME}'!{get_column_letter(GZ_COL_ZTOTAL)}{r_gz}"
         f_direct = (
             f'=IF({c["Тип блока"]}{r1}="{TYPE_RESIDENTIAL}",'
-            f'({c["Себестоимость коробки (методика)"]}{r1}+{c["Наружные работы блока (G), руб"]}{r1}'
+            f'{c["Себестоимость коробки (методика)"]}{r1}+{c["Наружные работы блока (G), руб"]}{r1}'
             f'+{c["Прочие затраты блока (Z), руб"]}{r1}'
-            f'+{c["Подземный паркинг, м/м"]}{r1}*{c["Ставка СМР подземного м/м, руб"]}{r1})*$E$4,'
+            f'+{c["Подземный паркинг, м/м"]}{r1}*{c["Ставка СМР подземного м/м, руб"]}{r1}*$E$4,'
             f'{c["Наземный/Многоуровневый паркинг, м/м"]}{r1}*{c["Ставка СМР наземного м/м, руб"]}{r1}*$E$4)'
         )
         f_full = f'={c["Аллоцированные затраты"]}{r1}+{c["Прямые затраты"]}{r1}'
@@ -2137,4 +2350,3 @@ st.download_button(
     file_name=f"financial_model_{scenario_name}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
-
