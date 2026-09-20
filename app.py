@@ -2137,3 +2137,4 @@ st.download_button(
     file_name=f"financial_model_{scenario_name}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
+
