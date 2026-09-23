@@ -476,6 +476,16 @@ DEFAULT_Z_FIXED_DF = pd.DataFrame(
     [{"Код": c, "Статья затрат": n, "Сумма, руб": 0.0} for c, n, s in ITEMS_Z_FIXED]
 )
 
+# Вкладка 4 «Инфраструктура» — код Z.50.10 «Покупка объекта недвижимости
+# (Инфраструктура)». В отличие от остальных статей Z, здесь нет ни каталога
+# заранее известных статей, ни ограничения по типу блока: пользователь сам
+# вписывает произвольные статьи (благоустройство, плейхаб, парк, дороги и
+# т.п.) по КАЖДОМУ урбан-блоку (жилому и паркингу) — строки добавляются
+# свободно, без предзаполненных значений. Сумма статей блока = его Z.50.10.
+INFRA_ITEM_COLS = ["Статья затрат", "Сумма, руб"]
+EMPTY_INFRA_DF = pd.DataFrame(columns=INFRA_ITEM_COLS)
+MAX_INFRA_ITEMS_PER_BLOCK = 10
+
 # ----------------------------------------------------------------------
 # Полная иерархия статей методики (группы A-Z) — для формы выгрузки Excel
 # "Экономика проекта" по образцу заказчика (3-колоночный код: буква/№1/№2).
@@ -616,7 +626,7 @@ REPORT_ROWS = [
     ("subgroup", "Z", 20, None, "Непредвиденные расходы по объекту", None),
     ("leaf", "Z", 20, 10, "Непредвиденные расходы по объекту", ("Z_PCT", "Z.20.10")),
     ("subgroup", "Z", 50, None, "Расходы по предпроектной стадии", None),
-    ("leaf", "Z", 50, 10, "Покупка объекта недвижимости (Инфраструктура)", None),
+    ("leaf", "Z", 50, 10, "Покупка объекта недвижимости (Инфраструктура)", ("INFRA_Z5010", None)),
     ("leaf", "Z", 50, 20, "Покупка объекта недвижимости (земля, недострой)", None),
     ("leaf", "Z", 50, 30, "Арендные платежи и расходы по регистрации договора аренды зем.участка", None),
     ("leaf", "Z", 50, 40, "Отселение/снос строений", None),
@@ -738,6 +748,7 @@ _SAVE_DF_KEYS = ["blocks_df"]
 # Словари {имя блока -> DataFrame}
 _SAVE_DICT_OF_DF_KEYS = [
     "block_rates", "block_g_area", "block_g_length", "block_z_pct", "block_z_fixed",
+    "block_infra",
 ]
 # Простые JSON-совместимые значения (строки/словари чисел/словарь словарей)
 _SAVE_PLAIN_KEYS = [
@@ -1094,6 +1105,8 @@ if "block_z_pct" not in st.session_state:
     st.session_state.block_z_pct = {}  # имя жилого блока -> DataFrame ставок Z (% от СМР+G блока)
 if "block_z_fixed" not in st.session_state:
     st.session_state.block_z_fixed = {}  # имя жилого блока -> DataFrame статей Z (прямой ввод суммы)
+if "block_infra" not in st.session_state:
+    st.session_state.block_infra = {}  # имя ЛЮБОГО урбан-блока -> DataFrame статей инфраструктуры (Z.50.10)
 if "block_mp_rate" not in st.session_state:
     st.session_state.block_mp_rate = {}  # имя жилого блока -> ставка коробки, руб/м2 NSA (этап МП)
 if "block_elevator_stops" not in st.session_state:
@@ -1103,8 +1116,8 @@ if "design_stage" not in st.session_state:
 if "tep_store" not in st.session_state:
     st.session_state.tep_store = {}  # имя жилого блока -> {поле ТЭП: значение}
 
-tab1, tab2, tab3 = st.tabs(
-    ["1. Объемы и ТЭП этапов", "2. Коммерческие параметры", "3. Себестоимость СМР"]
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["1. Объемы и ТЭП этапов", "2. Коммерческие параметры", "3. Себестоимость СМР", "4. Инфраструктура"]
 )
 
 # ------------------------------------------------------------------
@@ -1753,6 +1766,87 @@ with tab3:
         },
     )
 
+# ------------------------------------------------------------------
+# ВКЛАДКА 4: Инфраструктура (код Z.50.10) — ПО КАЖДОМУ УРБАН-БЛОКУ (жилому
+# и паркингу). В отличие от остальных статей Z, каталога заранее известных
+# статей нет — пользователь сам добавляет строки (благоустройство, плейхаб,
+# парк, дороги и т.п.), без предзаполненных значений. Сумма статей блока —
+# его Z.50.10, который прибавляется к прямым затратам блока наравне с
+# остальными статьями Z и переносится в общий перечень затрат при выгрузке
+# в Excel (вкладка «Экономика проекта», строка Z5010).
+# ------------------------------------------------------------------
+st.session_state.block_infra = {k: v for k, v in st.session_state.block_infra.items() if k in all_block_names}
+for _name in all_block_names:
+    # Пустая (0 строк) таблица при сохранении/восстановлении из JSON теряет
+    # колонки (сериализуется как []) — восстанавливаем шаблон колонок, если
+    # их нет. Если в таблице реально есть строки — колонки всегда на месте.
+    _existing_infra = st.session_state.block_infra.get(_name)
+    if _existing_infra is None or "Сумма, руб" not in _existing_infra.columns:
+        st.session_state.block_infra[_name] = EMPTY_INFRA_DF.copy()
+
+with tab4:
+    st.subheader("Инфраструктура")
+    st.caption(
+        "Код Z.50.10 «Покупка объекта недвижимости (Инфраструктура)» — своих статей по "
+        "методике нет, сумма набирается по фактическим затратам блока (благоустройство "
+        "вне двора, плейхаб, парк, дороги и т.п.). Задается ИНДИВИДУАЛЬНО по каждому "
+        "урбан-блоку (и жилому, и паркингу) — строки добавляются свободно (+), название и "
+        "сумму статьи вводит пользователь. Итог по блоку прибавляется к его прямым "
+        "затратам и переносится в общий перечень затрат при выгрузке в Excel (строка Z5010)."
+    )
+    if all_block_names:
+        selected_infra_block = st.selectbox("Урбан-блок", all_block_names, key="infra_block_selector")
+        infra_current_total = float(
+            pd.to_numeric(
+                st.session_state.block_infra[selected_infra_block]["Сумма, руб"], errors="coerce"
+            ).fillna(0.0).sum()
+        )
+        st.metric(f"Z5010 — блок «{selected_infra_block}»", f"{infra_current_total:,.0f} руб".replace(",", " "))
+        infra_edited = st.data_editor(
+            st.session_state.block_infra[selected_infra_block],
+            use_container_width=True,
+            num_rows="dynamic",
+            key=f"infra_editor_{selected_infra_block}",
+            column_config={
+                "Статья затрат": st.column_config.TextColumn(),
+                "Сумма, руб": st.column_config.NumberColumn(min_value=0, format="localized"),
+            },
+        )
+        if len(infra_edited) > MAX_INFRA_ITEMS_PER_BLOCK:
+            st.warning(f"Максимум {MAX_INFRA_ITEMS_PER_BLOCK} статей на блок — лишние строки не учитываются.")
+            infra_edited = infra_edited.iloc[:MAX_INFRA_ITEMS_PER_BLOCK].reset_index(drop=True)
+        st.session_state.block_infra[selected_infra_block] = infra_edited
+
+        st.divider()
+        st.markdown("**Инфраструктура (Z5010) по всем урбан-блокам**")
+        infra_summary_df = pd.DataFrame({
+            "Название блока": blocks["Название блока"],
+            "Тип блока": blocks["Тип блока"],
+            "Z5010, руб": [
+                float(pd.to_numeric(
+                    st.session_state.block_infra.get(n, EMPTY_INFRA_DF)["Сумма, руб"], errors="coerce"
+                ).fillna(0.0).sum())
+                for n in blocks["Название блока"]
+            ],
+        })
+        st.dataframe(
+            infra_summary_df, use_container_width=True,
+            column_config={"Z5010, руб": st.column_config.NumberColumn(format="localized")},
+        )
+    else:
+        st.info("Добавьте хотя бы один урбан-блок на Вкладке 1, чтобы задать инфраструктуру.")
+
+# Сумма статей инфраструктуры (Z.50.10) по блоку — на любой тип блока
+# (жилой/паркинг), в отличие от каталога A-E/G/Z (только жилые блоки).
+infra_total = np.array([
+    float(pd.to_numeric(
+        st.session_state.block_infra.get(blocks["Название блока"].iloc[i], EMPTY_INFRA_DF)["Сумма, руб"],
+        errors="coerce",
+    ).fillna(0.0).sum())
+    for i in range(N_ROWS)
+])
+blocks["Инфраструктура блока (Z5010), руб"] = infra_total * cost_factor
+
 # ======================================================================
 # 7. РАСЧЕТ ЭКОНОМИКИ (единая логика на всю таблицу, ветвление по типу)
 # ======================================================================
@@ -1770,14 +1864,20 @@ blocks["Аллоцированные затраты"] = blocks["Доля алл�
 # Прямые затраты: жилой блок = себестоимость коробки (по методике) + наружные
 # работы блока (G) + прочие затраты блока (Z) + подземный паркинг блока;
 # блок-паркинг = наземный/многоуровневый паркинг по своей ставке.
+# Инфраструктура блока (Z.50.10, Вкладка 4) прибавляется к обоим типам блока —
+# в отличие от каталога A-E/G/Z, эта статья не ограничена жилыми блоками.
 # Коробка/G/Z берутся уже со сценарием (см. выше) — это гарантирует, что
 # видимые слагаемые в таблицах сходятся с "Прямые затраты" в любом сценарии.
 direct_res = (
     blocks["Себестоимость коробки (методика)"] + blocks["Наружные работы блока (G), руб"]
     + blocks["Прочие затраты блока (Z), руб"]
     + blocks["Подземный паркинг, м/м"] * blocks["Ставка СМР подземного м/м, руб"] * cost_factor
+    + blocks["Инфраструктура блока (Z5010), руб"]
 )
-direct_park = blocks["Наземный/Многоуровневый паркинг, м/м"] * blocks["Ставка СМР наземного м/м, руб"] * cost_factor
+direct_park = (
+    blocks["Наземный/Многоуровневый паркинг, м/м"] * blocks["Ставка СМР наземного м/м, руб"] * cost_factor
+    + blocks["Инфраструктура блока (Z5010), руб"]
+)
 blocks["Прямые затраты"] = np.where(is_res, direct_res, direct_park)
 
 blocks["Полные затраты"] = blocks["Прямые затраты"] + blocks["Аллоцированные затраты"]
@@ -1940,6 +2040,7 @@ EXCEL_CALC_HEADERS = [
     "NSA, м2", "Доля аллокации", "Аллоцированные затраты",
     "Себестоимость коробки (методика)",
     "Наружные работы блока (G), руб", "Прочие затраты блока (Z), руб",
+    "Инфраструктура блока (Z5010), руб",
     "Прямые затраты", "Полные затраты", "Выручка", "Валовая прибыль", "Рентабельность",
 ]
 EXCEL_HEADERS = EXCEL_INPUT_HEADERS + EXCEL_CALC_HEADERS
@@ -2499,12 +2600,18 @@ def build_excel_report() -> bytes:
         r_gz = gz_first_row + i
         f_g = f"='{SHEET2_NAME}'!{get_column_letter(GZ_COL_GTOTAL)}{r_gz}"
         f_z = f"='{SHEET2_NAME}'!{get_column_letter(GZ_COL_ZTOTAL)}{r_gz}"
+        # Инфраструктура блока (Z.50.10, Вкладка 4) — детализация по статьям
+        # не выгружается (только итог по блоку), поэтому пишется как значение,
+        # а не как формула со ссылкой на отдельный лист-каталог.
+        f_infra = float(row["Инфраструктура блока (Z5010), руб"])
         f_direct = (
             f'=IF({c["Тип блока"]}{r1}="{TYPE_RESIDENTIAL}",'
             f'{c["Себестоимость коробки (методика)"]}{r1}+{c["Наружные работы блока (G), руб"]}{r1}'
             f'+{c["Прочие затраты блока (Z), руб"]}{r1}'
-            f'+{c["Подземный паркинг, м/м"]}{r1}*{c["Ставка СМР подземного м/м, руб"]}{r1}*$E$4,'
-            f'{c["Наземный/Многоуровневый паркинг, м/м"]}{r1}*{c["Ставка СМР наземного м/м, руб"]}{r1}*$E$4)'
+            f'+{c["Подземный паркинг, м/м"]}{r1}*{c["Ставка СМР подземного м/м, руб"]}{r1}*$E$4'
+            f'+{c["Инфраструктура блока (Z5010), руб"]}{r1},'
+            f'{c["Наземный/Многоуровневый паркинг, м/м"]}{r1}*{c["Ставка СМР наземного м/м, руб"]}{r1}*$E$4'
+            f'+{c["Инфраструктура блока (Z5010), руб"]}{r1})'
         )
         f_full = f'={c["Аллоцированные затраты"]}{r1}+{c["Прямые затраты"]}{r1}'
         f_revenue = (
@@ -2518,7 +2625,9 @@ def build_excel_report() -> bytes:
         f_profit = f'={c["Выручка"]}{r1}-{c["Полные затраты"]}{r1}'
         f_margin = f'=IF({c["Выручка"]}{r1}=0,0,{c["Валовая прибыль"]}{r1}/{c["Выручка"]}{r1})'
 
-        calc_formulas = [f_nsa, f_share, f_alloc, f_korobka, f_g, f_z, f_direct, f_full, f_revenue, f_profit, f_margin]
+        calc_formulas = [
+            f_nsa, f_share, f_alloc, f_korobka, f_g, f_z, f_infra, f_direct, f_full, f_revenue, f_profit, f_margin,
+        ]
         for k, formula in enumerate(calc_formulas):
             col_idx = len(EXCEL_INPUT_HEADERS) + 1 + k
             cell = ws1.cell(row=r1, column=col_idx, value=formula)
@@ -2531,6 +2640,7 @@ def build_excel_report() -> bytes:
     if N_ROWS > 0:
         for header_name in ["NSA, м2", "Доля аллокации", "Аллоцированные затраты", "Себестоимость коробки (методика)",
                              "Наружные работы блока (G), руб", "Прочие затраты блока (Z), руб",
+                             "Инфраструктура блока (Z5010), руб",
                              "Прямые затраты", "Полные затраты", "Выручка", "Валовая прибыль"]:
             col_letter = COL[header_name]
             ws1[f"{col_letter}{total_row1}"] = f"=SUM({col_letter}{first_row1}:{col_letter}{last_row1})"
@@ -2689,10 +2799,15 @@ def build_excel_report() -> bytes:
         """Формула суммы по одной статье затрат методики для блока name.
         Каталог A-Z считается только по жилым блокам (паркинг — вне каталога
         СМР, у него своя ставка паркинга) и только там, где статья есть в
-        модели — иначе 0 (по решению: каталог модели не меняем)."""
-        if source is None or block_types_all.get(name) != TYPE_RESIDENTIAL:
+        модели — иначе 0 (по решению: каталог модели не меняем). Исключение —
+        Z.50.10 (Инфраструктура, Вкладка 4): считается по ЛЮБОМУ типу блока."""
+        if source is None:
             return 0
         kind, code = source
+        if kind == "INFRA_Z5010":
+            return f"='{HELPER_SHEET_NAME}'!{COL['Инфраструктура блока (Z5010), руб']}{helper_row_for_block[name]}"
+        if block_types_all.get(name) != TYPE_RESIDENTIAL:
+            return 0
         if kind == "ITEMS":
             col = item_col_in_calc.get(code)
             if col is None:
