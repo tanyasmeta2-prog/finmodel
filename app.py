@@ -476,6 +476,159 @@ DEFAULT_Z_FIXED_DF = pd.DataFrame(
     [{"Код": c, "Статья затрат": n, "Сумма, руб": 0.0} for c, n, s in ITEMS_Z_FIXED]
 )
 
+# ----------------------------------------------------------------------
+# Полная иерархия статей методики (группы A-Z) — для формы выгрузки Excel
+# "Экономика проекта" по образцу заказчика (3-колоночный код: буква/№1/№2).
+# Статьи, которых нет в модели (вся группа F, часть D/G/Z), помечены
+# source=None — в выгрузке это пустая строка (0), каталог модели
+# (ITEMS/ITEMS_G_*/ITEMS_Z_*) при этом НЕ меняется.
+# ----------------------------------------------------------------------
+REPORT_ROWS = [
+    # (уровень, буква, №1, №2, наименование, источник)
+    # источник: None (сумма дочерних строк / нет данных в модели) |
+    # ("ITEMS", код) | ("G_AREA", код) | ("G_LENGTH", код) | ("Z_PCT", код) | ("Z_FIXED", код)
+    ("group", "A", None, None, "ПОДЗЕМНАЯ ЧАСТЬ", None),
+    ("subgroup", "A", 10, None, "Фундаменты", None),
+    ("leaf", "A", 10, 10, "Типовые фундаменты (ростверк)", ("ITEMS", "A.10.10")),
+    ("leaf", "A", 10, 20, "Специализированные работы (сваи)", ("ITEMS", "A.10.20")),
+    ("leaf", "A", 10, 30, "Фундаментная плита", ("ITEMS", "A.10.30")),
+    ("subgroup", "A", 20, None, "Строительство подземной части", None),
+    ("leaf", "A", 20, 10, "Земляные работы", ("ITEMS", "A.20.10")),
+    ("leaf", "A", 20, 20, "Конструкции подземной части", ("ITEMS", "A.20.20")),
+    ("leaf", "A", None, None, "Кладовые (перегородки, отделка)", ("ITEMS", "A.—")),
+    ("group", "B", None, None, "КОНСТРУКЦИИ", None),
+    ("subgroup", "B", 10, None, "Несущие конструкции", None),
+    ("leaf", "B", 10, 10, "Несущий каркас и плиты перекрытий, крыльцо, терраса", ("ITEMS", "B.10.10")),
+    ("leaf", "B", 10, 20, "Несущие конструкции кровли", None),
+    ("subgroup", "B", 20, None, "Ограждающие конструкции", None),
+    ("leaf", "B", 20, 10, "Наружные стены и фасады, Ограждение балконов", ("ITEMS", "B.20.10")),
+    ("leaf", "B", 20, 20, "Заполнение оконных проемов", ("ITEMS", "B.20.20")),
+    ("leaf", "B", 20, 30, "Заполнение дверных проемов", ("ITEMS", "B.20.30")),
+    ("leaf", "B", 20, 40, "Остекление лоджий и балконов", ("ITEMS", "B.20.40")),
+    ("subgroup", "B", 30, None, "Кровля", None),
+    ("leaf", "B", 30, 10, "Кровельные покрытия", ("ITEMS", "B.30.10")),
+    ("leaf", "B", 30, 20, "Кровельные проемы", None),
+    ("group", "C", None, None, "ВНУТРЕННИЕ РАБОТЫ", None),
+    ("subgroup", "C", 10, None, "Общестроительные работы", None),
+    ("leaf", "C", 10, 10, "Перегородки", ("ITEMS", "C.10.10")),
+    ("leaf", "C", 10, 20, "Внутренние двери", None),
+    ("leaf", "C", 10, 30, "Фурнитура", None),
+    ("subgroup", "C", 20, None, "Лестницы", None),
+    ("leaf", "C", 20, 10, "Конструкции лестниц", ("ITEMS", "C.20.10")),
+    ("leaf", "C", 20, 20, "Отделка лестниц", ("ITEMS", "C.20.20")),
+    ("subgroup", "C", 30, None, "Отделочные работы предчистовые квартир, чистовая МОП", None),
+    ("leaf", "C", 30, 10, "Отделка стен", ("ITEMS", "C.30.10")),
+    ("leaf", "C", 30, 20, "Отделка полов", ("ITEMS", "C.30.20")),
+    ("leaf", "C", 30, 30, "Отделка потолков", ("ITEMS", "C.30.30")),
+    ("subgroup", "C", 40, None, "Отделочные работы чистовые (по квартирам, по домам)", None),
+    ("leaf", "C", 40, 10, "Отделка стен", None),
+    ("leaf", "C", 40, 20, "Отделка полов", None),
+    ("leaf", "C", 40, 30, "Отделка потолков", None),
+    ("group", "D", None, None, "ВНУТРЕННИЕ ИНЖЕНЕРНЫЕ СИСТЕМЫ", None),
+    ("subgroup", "D", 10, None, "Подъемно-транспортное оборудование", None),
+    ("leaf", "D", 10, 10, "Лифты", ("ITEMS", "D.10.10")),
+    ("leaf", "D", 10, 20, "Эскалаторы", None),
+    ("leaf", "D", 10, 90, "Специализированное транспортное оборудование, Мусоропровод", None),
+    ("subgroup", "D", 20, None, "Системы ВК, газоснабжения и технологические трубопроводы", None),
+    ("leaf", "D", 20, 10, "Сантехническое оборудование", ("ITEMS", "D.20.10")),
+    ("leaf", "D", 20, 20, "Водоснабжение", ("ITEMS", "D.20.20")),
+    ("leaf", "D", 20, 30, "Хоз.быт. канализация", ("ITEMS", "D.20.30")),
+    ("leaf", "D", 20, 40, "Ливневая канализация", ("ITEMS", "D.20.40")),
+    ("leaf", "D", 20, 90, "Технологические трубопроводы и газоснабжение", ("ITEMS", "D.20.90")),
+    ("subgroup", "D", 30, None, "Отопление, вентиляция и кондиционирования", None),
+    ("leaf", "D", 30, 10, "Автономные источники энергоснабжения", None),
+    ("leaf", "D", 30, 20, "Котельные, ИТП и оборудование", None),
+    ("leaf", "D", 30, 30, "Система отопления", ("ITEMS", "D.30.30")),
+    ("leaf", "D", 30, 40, "Системы вентиляции и кондиционирования", ("ITEMS", "D.30.40")),
+    ("leaf", "D", 30, 50, "Оборудование", None),
+    ("leaf", "D", 30, 60, "КИП, Автоматизация и Диспетчеризация", None),
+    ("leaf", "D", 30, 70, "Пуско-наладочные работы систем ОВиК", None),
+    ("leaf", "D", 30, 80, "Специализированные системы ОВиК", None),
+    ("subgroup", "D", 40, None, "Противопожарные системы", None),
+    ("leaf", "D", 40, 10, "Система спринклерного пожаротушения", None),
+    ("leaf", "D", 40, 20, "Система пожарного водоснабжения", None),
+    ("leaf", "D", 40, 30, "Пожарные шкафы и огнетушители", None),
+    ("leaf", "D", 40, 40, "Система АПС (Автоматическая пожарная сигнализация)", ("ITEMS", "D.40.40")),
+    ("leaf", "D", 40, 90, "Специализированные системы пожаротушения", None),
+    ("subgroup", "D", 50, None, "Электрические сети и оборудование", None),
+    ("leaf", "D", 50, 10, "Силовое оборудование и распределительные сети", ("ITEMS", "D.50.10")),
+    ("leaf", "D", 50, 20, "Сети освещения", ("ITEMS", "D.50.20")),
+    ("leaf", "D", 50, 30, "Слаботочные сети, системы телекоммуникации, интернет, домофон, АСКУЭ", ("ITEMS", "D.50.30")),
+    ("leaf", "D", 50, 40, "Установка конечных элементов в МОП", None),
+    ("leaf", "D", 50, 50, "Установка конечных элементов в квартирах", None),
+    ("leaf", "D", 50, 90, "Другие слаботочные сети и оборудование", None),
+    ("group", "E", None, None, "ОБОРУДОВАНИЕ", None),
+    ("subgroup", "E", 10, None, "Технологическое оборудование", None),
+    ("leaf", "E", 10, 10, "Коммерческое оборудование", None),
+    ("leaf", "E", 10, 20, "Оборудование промышленного назначения", None),
+    ("leaf", "E", 10, 30, "Транспортное оборудование", None),
+    ("leaf", "E", 10, 90, "Другое технологическое оборудование", None),
+    ("subgroup", "E", 20, None, "Мебель и аксессуары", None),
+    ("leaf", "E", 20, 10, "Встроенная мебель и аксессуары", ("ITEMS", "E.20.10")),
+    ("leaf", "E", 20, 20, "Мебель, оборудование и аксессуары", ("ITEMS", "E.20.20")),
+    ("group", "F", None, None, "СПЕЦИАЛИЗИРОВАННЫЕ РАБОТЫ", None),
+    ("subgroup", "F", 10, None, "Специализированные конструкции и системы", None),
+    ("leaf", "F", 10, 10, "Специализированные несущие конструкции", None),
+    ("leaf", "F", 10, 20, "Сборные здания и сооружения", None),
+    ("leaf", "F", 10, 30, "Системы специального назначения", None),
+    ("leaf", "F", 10, 40, "Специализированные технологические системы", None),
+    ("leaf", "F", 10, 50, "КИП и автоматика для специализированных систем", None),
+    ("subgroup", "F", 20, None, "Специализированные - разборка, удаление и вывоз конструкций", None),
+    ("leaf", "F", 20, 10, "Разборка отдельных конструкций существующих зданий", None),
+    ("leaf", "F", 20, 20, "Удаление опасных материалов", None),
+    ("group", "G", None, None, "НАРУЖНЫЕ РАБОТЫ", None),
+    ("subgroup", "G", 10, None, "Подготовка площадки", None),
+    ("leaf", "G", 10, 10, "Очистка площадки", ("G_AREA", "G.10.10")),
+    ("leaf", "G", 10, 20, "Разборка и вывоз сооружений", ("G_AREA", "G.10.20")),
+    ("leaf", "G", 10, 30, "Земляные работы по подготовке площадки", ("G_AREA", "G.10.30")),
+    ("leaf", "G", 10, 40, "Удаление, вывоз и утилизация материалов и мусора", None),
+    ("leaf", "G", 10, 50, "Инженерная подготовка территории", ("G_AREA", "G.10.50")),
+    ("subgroup", "G", 20, None, "Благоустройство и озеленение", None),
+    ("leaf", "G", 20, 10, "Дороги", ("G_AREA", "G.20.10")),
+    ("leaf", "G", 20, 20, "Автостоянки", None),
+    ("leaf", "G", 20, 30, "Пешеходные дороги", None),
+    ("leaf", "G", 20, 40, "МАФ, оборудование детских площадок, постоянный забор", ("G_AREA", "G.20.40")),
+    ("leaf", "G", 20, 50, "Озеленение", ("G_AREA", "G.20.50")),
+    ("subgroup", "G", 30, None, "Наружные трубопроводы", None),
+    ("leaf", "G", 30, 10, "Водоснабжение", ("G_LENGTH", "G.30.10")),
+    ("leaf", "G", 30, 20, "Хоз.быт. канализация", ("G_LENGTH", "G.30.20")),
+    ("leaf", "G", 30, 30, "Ливневая канализация", ("G_LENGTH", "G.30.30")),
+    ("leaf", "G", 30, 40, "Сети теплоснабжения", ("G_LENGTH", "G.30.40")),
+    ("leaf", "G", 30, 50, "Сети холодоснабжения", ("G_LENGTH", "G.30.50")),
+    ("leaf", "G", 30, 60, "Топливоснабжение", ("G_LENGTH", "G.30.60")),
+    ("leaf", "G", 30, 90, "Технологические трубопроводы", None),
+    ("subgroup", "G", 40, None, "Наружные электротехнические сети", None),
+    ("leaf", "G", 40, 10, "Сети электроснабжения, трансформаторная подстанция", ("G_LENGTH", "G.40.10")),
+    ("leaf", "G", 40, 20, "Наружное освещение", ("G_AREA", "G.40.20")),
+    ("leaf", "G", 40, 30, "Наружные слаботочные сети", None),
+    ("leaf", "G", 40, 90, "Системы аварийного электроснабжения", None),
+    ("subgroup", "G", 90, None, "Специальные наружные работы", None),
+    ("leaf", "G", 90, 10, "Технологические каналы и пешеходные тоннели", None),
+    ("leaf", "G", 90, 20, "Системы снеготаяния", None),
+    ("group", "Z", None, None, "ПРОЧИЕ ЗАТРАТЫ, связанные с СМР", None),
+    ("subgroup", "Z", 10, None, "Услуги, временные здания и работы", None),
+    ("leaf", "Z", 10, 10, "Услуги ген.подрядчика", ("Z_PCT", "Z.10.10")),
+    ("leaf", "Z", 10, 20, "Контроль качества выполнения работ", ("Z_FIXED", "Z.10.20")),
+    ("leaf", "Z", 10, 30, "Строительство временных зданий и сооружений", ("Z_FIXED", "Z.10.30")),
+    ("leaf", "Z", 10, 40, "Коммунальные услуги по объекту в период строительства", ("Z_FIXED", "Z.10.40")),
+    ("leaf", "Z", 10, 50, "Услуги сторонних организаций, связанные с СМР, разрешения, согласования, сдача объекта", ("Z_FIXED", "Z.10.50")),
+    ("leaf", "Z", 10, 60, "Проектирование, изыскания, авторский надзор", ("Z_FIXED", "Z.10.60")),
+    ("subgroup", "Z", 20, None, "Непредвиденные расходы по объекту", None),
+    ("leaf", "Z", 20, 10, "Непредвиденные расходы по объекту", ("Z_PCT", "Z.20.10")),
+    ("subgroup", "Z", 50, None, "Расходы по предпроектной стадии", None),
+    ("leaf", "Z", 50, 10, "Покупка объекта недвижимости (Инфраструктура)", None),
+    ("leaf", "Z", 50, 20, "Покупка объекта недвижимости (земля, недострой)", None),
+    ("leaf", "Z", 50, 30, "Арендные платежи и расходы по регистрации договора аренды зем.участка", None),
+    ("leaf", "Z", 50, 40, "Отселение/снос строений", None),
+    ("leaf", "Z", 50, 50, "Оформление объекта (постановление, кадастр, регистрация, межевание)", None),
+    ("subgroup", "Z", 150, None, "Технологическое присоединение", ("Z_FIXED", "Z.150")),
+    ("leaf", "Z", 150, 10, "Технологическое присоединение водопровод", None),
+    ("leaf", "Z", 150, 20, "Технологическое присоединение хозбытовая канализация", None),
+    ("leaf", "Z", 150, 30, "Технологическое присоединение теплоснабжение", None),
+    ("leaf", "Z", 150, 40, "Технологическое присоединение электроснабжение", None),
+    ("leaf", "Z", 150, 50, "Технологическое присоединение газоснабжение", None),
+]
+
 
 def get_basis_values(basis_key: str, df: pd.DataFrame, nsa: np.ndarray) -> np.ndarray:
     """Возвращает массив значений базы расчета (площадь/объем/шт) по каждой строке блоков."""
@@ -758,10 +911,32 @@ with st.sidebar:
         _picked = st.selectbox("Открыть сохраненный проект", _options, key="_project_picker")
         if _picked != _options[0]:
             _picked_idx = _options.index(_picked) - 1
-            if st.button("📂 Загрузить"):
-                autosave_load(_saves[_picked_idx]["path"])
-                st.session_state["_autosave_loaded"] = True
-                st.rerun()
+            _picked_save = _saves[_picked_idx]
+            col_load, col_del = st.columns(2)
+            with col_load:
+                if st.button("📂 Загрузить"):
+                    autosave_load(_picked_save["path"])
+                    st.session_state["_autosave_loaded"] = True
+                    st.rerun()
+            with col_del:
+                _confirm_del = st.checkbox("Точно удалить", key="_confirm_delete_save")
+                if st.button("🗑️ Удалить", disabled=not _confirm_del):
+                    try:
+                        _picked_save["path"].unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    pointer = _read_pointer()
+                    if (
+                        pointer
+                        and pointer.get("user_name") == _picked_save["user_name"]
+                        and pointer.get("project_name") == _picked_save["project_name"]
+                    ):
+                        try:
+                            POINTER_PATH.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    st.session_state.pop("_confirm_delete_save", None)
+                    st.rerun()
     else:
         st.caption("Пока нет сохраненных проектов.")
     st.text_input(
@@ -1739,6 +1914,7 @@ def zebra(i: int) -> PatternFill:
     """Чередующаяся заливка строк данных по индексу i (0-based)."""
     return ZEBRA_FILL if i % 2 == 1 else WHITE_FILL
 
+HELPER_SHEET_NAME = "Расчет по блокам (служебный)"
 SHEET1_NAME = "Экономика проекта"
 SHEET2_NAME = "СМР по методике"
 
@@ -1790,7 +1966,7 @@ def build_excel_report() -> bytes:
     изменение ставок в каталоге (Лист 2) пересчитывает весь отчет."""
     wb = Workbook()
     ws1 = wb.active
-    ws1.title = SHEET1_NAME
+    ws1.title = HELPER_SHEET_NAME
 
     ws1["A1"] = f"Проект: {project_name}"
     ws1["A1"].font = TITLE_FONT
@@ -1845,11 +2021,11 @@ def build_excel_report() -> bytes:
             row_fill = zebra(i)
             style_cell(ws2.cell(row=r2, column=1, value=block_name), fill=row_fill)
             style_cell(ws2.cell(row=r2, column=2, value=row["Тип блока"]), fill=row_fill)
-            nsa_ref = f"'{SHEET1_NAME}'!{COL['NSA, м2']}{r1}"
+            nsa_ref = f"'{HELPER_SHEET_NAME}'!{COL['NSA, м2']}{r1}"
             style_cell(ws2.cell(row=r2, column=3, value=f"={nsa_ref}"), number_format=MONEY_FMT, fill=row_fill)
             rate_val = float(st.session_state.block_mp_rate.get(block_name, 0.0)) if row["Тип блока"] == TYPE_RESIDENTIAL else 0.0
             style_cell(ws2.cell(row=r2, column=4, value=rate_val), number_format=MONEY_FMT, fill=row_fill)
-            total_cell = ws2.cell(row=r2, column=total_col_idx2, value=f"=C{r2}*D{r2}*'{SHEET1_NAME}'!$E$4")
+            total_cell = ws2.cell(row=r2, column=total_col_idx2, value=f"=C{r2}*D{r2}*'{HELPER_SHEET_NAME}'!$E$4")
             style_cell(total_cell, number_format=MONEY_MM_FMT, bold=True, fill=TOTAL_FILL)
         calc_last_row = calc_first_row + N_ROWS - 1
 
@@ -1937,21 +2113,21 @@ def build_excel_report() -> bytes:
             style_cell(ws2.cell(row=r2, column=1), fill=row_fill)
             style_cell(ws2.cell(row=r2, column=2), fill=row_fill)
 
-            type_ref = f"'{SHEET1_NAME}'!{COL['Тип блока']}{r1}"
+            type_ref = f"'{HELPER_SHEET_NAME}'!{COL['Тип блока']}{r1}"
             rate_col_letter = rate_col_for_block.get(block_name)
             for k, code in enumerate(item_codes):
                 basis_key = code_to_basis[code]
                 if basis_key == "NSA":
-                    qty_ref = f"'{SHEET1_NAME}'!{COL['NSA, м2']}{r1}"
+                    qty_ref = f"'{HELPER_SHEET_NAME}'!{COL['NSA, м2']}{r1}"
                 elif basis_key == "VOL_TOTAL":
-                    qty_ref = f"('{SHEET1_NAME}'!{COL['Объем здания ниже 0, м3']}{r1}+'{SHEET1_NAME}'!{COL['Объем здания выше 0, м3']}{r1})"
+                    qty_ref = f"('{HELPER_SHEET_NAME}'!{COL['Объем здания ниже 0, м3']}{r1}+'{HELPER_SHEET_NAME}'!{COL['Объем здания выше 0, м3']}{r1})"
                 elif basis_key == "STORAGE_AREA":
-                    qty_ref = f"'{SHEET1_NAME}'!{COL['S кладовых, м2']}{r1}"
+                    qty_ref = f"'{HELPER_SHEET_NAME}'!{COL['S кладовых, м2']}{r1}"
                 elif basis_key == "ELEVATOR_STOPS":
                     qty_ref = f"{rate_col_letter}${stops_row}" if rate_col_letter is not None else "0"
                 else:
                     basis_col_name = BASIS_COLUMN[basis_key]
-                    qty_ref = f"'{SHEET1_NAME}'!{COL[basis_col_name]}{r1}"
+                    qty_ref = f"'{HELPER_SHEET_NAME}'!{COL[basis_col_name]}{r1}"
                 if rate_col_letter is not None:
                     rate_ref = f"{rate_col_letter}${rate_row_by_code[code]}"
                     formula = f'=IF({type_ref}="{TYPE_RESIDENTIAL}",{qty_ref}*{rate_ref},0)'
@@ -1962,7 +2138,7 @@ def build_excel_report() -> bytes:
 
             first_item_col = get_column_letter(3)
             last_item_col = get_column_letter(2 + len(item_codes))
-            total_cell = ws2.cell(row=r2, column=total_col_idx2, value=f"=SUM({first_item_col}{r2}:{last_item_col}{r2})*'{SHEET1_NAME}'!$E$4")
+            total_cell = ws2.cell(row=r2, column=total_col_idx2, value=f"=SUM({first_item_col}{r2}:{last_item_col}{r2})*'{HELPER_SHEET_NAME}'!$E$4")
             style_cell(total_cell, number_format=MONEY_MM_FMT, bold=True, fill=TOTAL_FILL)
         calc_last_row = calc_first_row + N_ROWS - 1
 
@@ -2224,13 +2400,13 @@ def build_excel_report() -> bytes:
         style_cell(ws2.cell(row=r, column=1, value=block_name), fill=row_fill)
         style_cell(ws2.cell(row=r, column=2, value=row["Тип блока"]), fill=row_fill)
 
-        plot_area_ref = f"'{SHEET1_NAME}'!{COL['Площадь участка блока, га']}{r1}"
+        plot_area_ref = f"'{HELPER_SHEET_NAME}'!{COL['Площадь участка блока, га']}{r1}"
         style_cell(ws2.cell(row=r, column=GZ_COL_PLOT, value=f"={plot_area_ref}"), number_format="0.00", fill=row_fill)
 
         g_area_rate_col = rate_col_for_g_area.get(block_name)
         g_area_formula = (
             f"={plot_area_ref}*SUM({g_area_rate_col}{g_area_first_row}:{g_area_rate_col}{g_area_last_row})"
-            f"*'{SHEET1_NAME}'!$E$4"
+            f"*'{HELPER_SHEET_NAME}'!$E$4"
             if g_area_rate_col is not None else 0
         )
         style_cell(ws2.cell(row=r, column=GZ_COL_GAREA, value=g_area_formula), number_format=MONEY_FMT, fill=row_fill)
@@ -2239,7 +2415,7 @@ def build_excel_report() -> bytes:
         g_length_formula = (
             f"=SUMPRODUCT({qty_col}{g_length_first_row}:{qty_col}{g_length_last_row},"
             f"{rate_col}{g_length_first_row}:{rate_col}{g_length_last_row})"
-            f"*'{SHEET1_NAME}'!$E$4"
+            f"*'{HELPER_SHEET_NAME}'!$E$4"
             if qty_col is not None else 0
         )
         style_cell(ws2.cell(row=r, column=GZ_COL_GLEN, value=g_length_formula), number_format=MONEY_FMT, fill=row_fill)
@@ -2253,9 +2429,9 @@ def build_excel_report() -> bytes:
         # Подземный паркинг в составе урбан-блока — генподряд/непредвиденные (Z%)
         # начисляются в т.ч. на его стоимость (та же % ставка блока).
         parking_formula = (
-            f"='{SHEET1_NAME}'!{COL['Подземный паркинг, м/м']}{r1}"
-            f"*'{SHEET1_NAME}'!{COL['Ставка СМР подземного м/м, руб']}{r1}"
-            f"*'{SHEET1_NAME}'!$E$4"
+            f"='{HELPER_SHEET_NAME}'!{COL['Подземный паркинг, м/м']}{r1}"
+            f"*'{HELPER_SHEET_NAME}'!{COL['Ставка СМР подземного м/м, руб']}{r1}"
+            f"*'{HELPER_SHEET_NAME}'!$E$4"
         )
         style_cell(ws2.cell(row=r, column=GZ_COL_PARKING, value=parking_formula), number_format=MONEY_FMT, fill=row_fill)
 
@@ -2275,7 +2451,7 @@ def build_excel_report() -> bytes:
         z_fixed_col = sum_col_for_z_fixed.get(block_name)
         z_fixed_formula = (
             f"=SUM({z_fixed_col}{z_fixed_first_row}:{z_fixed_col}{z_fixed_last_row})"
-            f"*'{SHEET1_NAME}'!$E$4"
+            f"*'{HELPER_SHEET_NAME}'!$E$4"
             if z_fixed_col is not None else 0
         )
         style_cell(ws2.cell(row=r, column=GZ_COL_ZFIXED, value=z_fixed_formula), number_format=MONEY_FMT, fill=row_fill)
@@ -2452,6 +2628,354 @@ def build_excel_report() -> bytes:
     ws2.add_image(logo_img2, f"{get_column_letter(total_col_idx2 + 2)}1")
     ws2.sheet_view.showGridLines = False
 
+    # Служебный лист (данные по блокам) не показываем пользователю — он
+    # используется только формулами "СМР по методике" и нового отчета ниже.
+    ws1.sheet_state = "hidden"
+
+    # ==================================================================
+    # НОВЫЙ ЛИСТ "Экономика проекта" — свод по форме заказчика: пара колонок
+    # (Сумма + на 1 кв.м. NSA) на каждый блок + колонка ИТОГО по проекту;
+    # строки — иерархия статей затрат методики (группы A-Z), код разбит на
+    # 3 колонки (буква/№1/№2), сверху блок продаж/выручки, снизу — прямые
+    # /полные затраты, выручка, прибыль, рентабельность. Все ячейки — живые
+    # формулы (ссылки на служебный лист и на «СМР по методике»).
+    # ------------------------------------------------------------------
+    ws_report = wb.create_sheet(SHEET1_NAME)
+    ws_report.sheet_view.showGridLines = False
+
+    block_names_all = list(blocks["Название блока"])
+    block_types_all = dict(zip(blocks["Название блока"], blocks["Тип блока"]))
+    n_blocks_r = len(block_names_all)
+    FIRST_BLOCK_COL = 5  # A-D заняты кодом статьи (буква/№1/№2) и наименованием
+    r_sum_col = {name: FIRST_BLOCK_COL + 2 * i for i, name in enumerate(block_names_all)}
+    r_pm2_col = {name: FIRST_BLOCK_COL + 2 * i + 1 for i, name in enumerate(block_names_all)}
+    r_total_sum_col = FIRST_BLOCK_COL + 2 * n_blocks_r
+    r_total_pm2_col = r_total_sum_col + 1
+    n_cols_report = r_total_pm2_col
+
+    calc_row_for_block = {name: calc_first_row + i for i, name in enumerate(block_names_all)}
+    gz_row_for_block = {name: gz_first_row + i for i, name in enumerate(block_names_all)}
+    helper_row_for_block = {name: first_row1 + i for i, name in enumerate(block_names_all)}
+    item_col_in_calc = (
+        {} if is_mp_stage else {code: get_column_letter(3 + k) for k, code in enumerate(item_codes_master)}
+    )
+    g_area_row_for_code = {code: g_area_first_row + i for i, (code, *_r) in enumerate(ITEMS_G_AREA)}
+    g_length_row_for_code = {code: g_length_first_row + i for i, (code, *_r) in enumerate(ITEMS_G_LENGTH)}
+    z_pct_row_for_code = {code: z_pct_first_row + i for i, (code, *_r) in enumerate(ITEMS_Z_PCT)}
+    z_fixed_row_for_code = {code: z_fixed_first_row + i for i, (code, *_r) in enumerate(ITEMS_Z_FIXED)}
+
+    def r_nsa_ref(name):
+        return f"'{HELPER_SHEET_NAME}'!{COL['NSA, м2']}{helper_row_for_block[name]}"
+
+    r_nsa_total_ref = f"'{HELPER_SHEET_NAME}'!{COL['NSA, м2']}{total_row1}" if N_ROWS > 0 else "0"
+
+    def r_pm2_formula(sum_ref, nsa_ref):
+        return f"=IF({nsa_ref}=0,0,{sum_ref}/{nsa_ref})"
+
+    def r_helper_ref(header_name, name):
+        return f"'{HELPER_SHEET_NAME}'!{COL[header_name]}{helper_row_for_block[name]}"
+
+    def r_leaf_formula(source, name):
+        """Формула суммы по одной статье затрат методики для блока name.
+        Каталог A-Z считается только по жилым блокам (паркинг — вне каталога
+        СМР, у него своя ставка паркинга) и только там, где статья есть в
+        модели — иначе 0 (по решению: каталог модели не меняем)."""
+        if source is None or block_types_all.get(name) != TYPE_RESIDENTIAL:
+            return 0
+        kind, code = source
+        if kind == "ITEMS":
+            col = item_col_in_calc.get(code)
+            if col is None:
+                return 0
+            return f"='{SHEET2_NAME}'!{col}{calc_row_for_block[name]}"
+        if kind == "G_AREA":
+            rate_col = rate_col_for_g_area.get(name)
+            if rate_col is None:
+                return 0
+            row = g_area_row_for_code[code]
+            plot_ref = f"'{HELPER_SHEET_NAME}'!{COL['Площадь участка блока, га']}{helper_row_for_block[name]}"
+            return f"={plot_ref}*'{SHEET2_NAME}'!{rate_col}{row}*'{HELPER_SHEET_NAME}'!$E$4"
+        if kind == "G_LENGTH":
+            cols = glen_cols_for_block.get(name)
+            if cols is None:
+                return 0
+            qty_col, rate_col = cols
+            row = g_length_row_for_code[code]
+            return f"='{SHEET2_NAME}'!{qty_col}{row}*'{SHEET2_NAME}'!{rate_col}{row}*'{HELPER_SHEET_NAME}'!$E$4"
+        if kind == "Z_PCT":
+            rate_col = rate_col_for_z_pct.get(name)
+            if rate_col is None:
+                return 0
+            row = z_pct_row_for_code[code]
+            zbase_ref = f"'{SHEET2_NAME}'!{get_column_letter(GZ_COL_ZBASE)}{gz_row_for_block[name]}"
+            return f"={zbase_ref}*'{SHEET2_NAME}'!{rate_col}{row}"
+        if kind == "Z_FIXED":
+            sum_col = sum_col_for_z_fixed.get(name)
+            if sum_col is None:
+                return 0
+            row = z_fixed_row_for_code[code]
+            return f"='{SHEET2_NAME}'!{sum_col}{row}*'{HELPER_SHEET_NAME}'!$E$4"
+        return 0
+
+    def rr_write_labels(row, letter, num1, num2, label, bold=False, section=False):
+        if section:
+            ws_report.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+            c = ws_report.cell(row=row, column=1, value=label)
+            c.font = TITLE_FONT if bold else PARAM_FONT
+            return
+        if letter is not None:
+            style_cell(ws_report.cell(row=row, column=1, value=letter))
+        if num1 is not None:
+            style_cell(ws_report.cell(row=row, column=2, value=num1))
+        if num2 is not None:
+            style_cell(ws_report.cell(row=row, column=3, value=num2))
+        cell_d = ws_report.cell(row=row, column=4, value=label)
+        style_cell(cell_d)
+        if bold:
+            cell_d.font = PARAM_FONT
+
+    def rr_write_data_row(row, block_formula_fn, fill_pm2=True, bold=False, fmt=MONEY_FMT,
+                           total_mode="sum", total_ref=None):
+        """total_mode: 'sum' — ИТОГО = сумма по блокам (по умолчанию);
+        'ref' — ИТОГО = total_ref (формула-строка), напр. для % показателей;
+        'none' — колонка ИТОГО не заполняется (напр. для средних цен)."""
+        fill = TOTAL_FILL if bold else None
+        for name in block_names_all:
+            sc, pc = r_sum_col[name], r_pm2_col[name]
+            val = block_formula_fn(name)
+            style_cell(ws_report.cell(row=row, column=sc, value=val), number_format=fmt, bold=bold, fill=fill)
+            if fill_pm2:
+                nsa_ref = r_nsa_ref(name)
+                sum_ref = f"{get_column_letter(sc)}{row}"
+                pm2_val = r_pm2_formula(sum_ref, nsa_ref)
+                style_cell(ws_report.cell(row=row, column=pc, value=pm2_val), number_format=MONEY_FMT, bold=bold, fill=fill)
+        if total_mode == "none":
+            return
+        if total_mode == "ref" and total_ref is not None:
+            total_formula = total_ref
+        elif N_ROWS > 0:
+            total_formula = "=SUM(" + ",".join(f"{get_column_letter(r_sum_col[n])}{row}" for n in block_names_all) + ")"
+        else:
+            total_formula = 0
+        style_cell(ws_report.cell(row=row, column=r_total_sum_col, value=total_formula),
+                   number_format=fmt, bold=True, fill=TOTAL_FILL)
+        if fill_pm2:
+            if total_mode == "ref" and total_ref is not None:
+                tpm2_val = total_ref  # % и т.п. — то же значение, доля от м2 не нужна
+            else:
+                total_sum_ref = f"{get_column_letter(r_total_sum_col)}{row}"
+                tpm2_val = r_pm2_formula(total_sum_ref, r_nsa_total_ref)
+            style_cell(ws_report.cell(row=row, column=r_total_pm2_col, value=tpm2_val),
+                       number_format=MONEY_FMT, bold=True, fill=TOTAL_FILL)
+        else:
+            style_cell(ws_report.cell(row=row, column=r_total_pm2_col), fill=TOTAL_FILL)
+
+    # -- шапка отчета (проект/город/сценарий/параметры) --
+    ws_report["A1"] = f"Проект: {project_name}"
+    ws_report["A1"].font = TITLE_FONT
+    ws_report["A2"] = f"Город: {project_city}"
+    ws_report["A2"].font = TITLE_FONT
+    ws_report["A3"] = f"Сценарий: {scenario_name}"
+    ws_report["A3"].font = TITLE_FONT
+    ws_report["A4"] = "Коэфф. выручки (сценарий):"
+    ws_report["A4"].font = PARAM_FONT
+    ws_report["B4"] = rev_factor
+    ws_report["D4"] = "Коэфф. затрат (сценарий):"
+    ws_report["D4"].font = PARAM_FONT
+    ws_report["E4"] = cost_factor
+
+    # -- шапка колонок: наименование блока на пару (Сумма | на 1 кв.м.) --
+    ROW_BLOCK_HDR, ROW_SUBHDR = 6, 7
+    ws_report.cell(row=ROW_BLOCK_HDR, column=1, value="Код затрат").font = HEADER_FONT
+    ws_report.merge_cells(start_row=ROW_SUBHDR, start_column=1, end_row=ROW_SUBHDR, end_column=3)
+    ws_report.cell(row=ROW_SUBHDR, column=1, value="код затрат")
+    ws_report.cell(row=ROW_SUBHDR, column=4, value="Статьи затрат / показатели")
+    for name in block_names_all:
+        sc, pc = r_sum_col[name], r_pm2_col[name]
+        ws_report.merge_cells(start_row=ROW_BLOCK_HDR, start_column=sc, end_row=ROW_BLOCK_HDR, end_column=pc)
+        hcell = ws_report.cell(row=ROW_BLOCK_HDR, column=sc, value=f"{name} ({block_types_all[name]})")
+        ws_report.cell(row=ROW_SUBHDR, column=sc, value="Сумма, руб")
+        ws_report.cell(row=ROW_SUBHDR, column=pc, value="на 1 кв.м. NSA, руб/м2")
+        ws_report.column_dimensions[get_column_letter(sc)].width = 16
+        ws_report.column_dimensions[get_column_letter(pc)].width = 16
+    ws_report.merge_cells(start_row=ROW_BLOCK_HDR, start_column=r_total_sum_col, end_row=ROW_BLOCK_HDR, end_column=r_total_pm2_col)
+    ws_report.cell(row=ROW_BLOCK_HDR, column=r_total_sum_col, value="ИТОГО ПО ПРОЕКТУ")
+    ws_report.cell(row=ROW_SUBHDR, column=r_total_sum_col, value="Сумма, руб")
+    ws_report.cell(row=ROW_SUBHDR, column=r_total_pm2_col, value="на 1 кв.м. NSA, руб/м2")
+    ws_report.column_dimensions[get_column_letter(r_total_sum_col)].width = 16
+    ws_report.column_dimensions[get_column_letter(r_total_pm2_col)].width = 16
+    style_header_row(ws_report, ROW_BLOCK_HDR, n_cols_report)
+    style_header_row(ws_report, ROW_SUBHDR, n_cols_report)
+    ws_report.column_dimensions["A"].width = 6
+    ws_report.column_dimensions["B"].width = 6
+    ws_report.column_dimensions["C"].width = 6
+    ws_report.column_dimensions["D"].width = 46
+
+    type_ref_cache = {name: r_helper_ref("Тип блока", name) for name in block_names_all}
+    apt_ref = {name: r_helper_ref("S квартир, м2", name) for name in block_names_all}
+    com_ref = {name: r_helper_ref("S коммерции 1 эт., м2", name) for name in block_names_all}
+    storage_ref = {name: r_helper_ref("S кладовых, м2", name) for name in block_names_all}
+    park_u_ref = {name: r_helper_ref("Подземный паркинг, м/м", name) for name in block_names_all}
+    park_g_ref = {name: r_helper_ref("Наземный/Многоуровневый паркинг, м/м", name) for name in block_names_all}
+    price_apt_ref = {name: r_helper_ref("Цена жилья, руб/м2", name) for name in block_names_all}
+    price_com_ref = {name: r_helper_ref("Цена коммерции, руб/м2", name) for name in block_names_all}
+    price_storage_ref = {name: r_helper_ref("Цена кладовых, руб/м2", name) for name in block_names_all}
+    price_park_u_ref = {name: r_helper_ref("Цена подземного м/м, руб", name) for name in block_names_all}
+    price_park_g_ref = {name: r_helper_ref("Цена наземного м/м, руб", name) for name in block_names_all}
+
+    # -- Продаваемая площадь --
+    ROW_SEC_AREA = 9
+    ROW_AREA_RES, ROW_AREA_COM, ROW_AREA_STOR, ROW_AREA_PARK = 10, 11, 12, 13
+    rr_write_labels(ROW_SEC_AREA, None, None, None, "ПРОДАВАЕМАЯ ПЛОЩАДЬ", bold=True, section=True)
+    rr_write_labels(ROW_AREA_RES, None, None, None, "Площадь жилых, м2")
+    rr_write_labels(ROW_AREA_COM, None, None, None, "Площадь нежилых, м2")
+    rr_write_labels(ROW_AREA_STOR, None, None, None, "Площадь кладовых, м2")
+    rr_write_labels(ROW_AREA_PARK, None, None, None, "Паркинг, м/м")
+    rr_write_data_row(ROW_AREA_RES, lambda n: f"={apt_ref[n]}", fill_pm2=False, fmt=MONEY_FMT)
+    rr_write_data_row(ROW_AREA_COM, lambda n: f"={com_ref[n]}", fill_pm2=False, fmt=MONEY_FMT)
+    rr_write_data_row(ROW_AREA_STOR, lambda n: f"={storage_ref[n]}", fill_pm2=False, fmt=MONEY_FMT)
+    rr_write_data_row(ROW_AREA_PARK, lambda n: f"={park_u_ref[n]}+{park_g_ref[n]}", fill_pm2=False, fmt=MONEY_FMT)
+
+    # -- Средневзвешенная цена --
+    ROW_SEC_PRICE = 15
+    ROW_PRICE_RES, ROW_PRICE_COM, ROW_PRICE_STOR, ROW_PRICE_PARK = 16, 17, 18, 19
+    rr_write_labels(ROW_SEC_PRICE, None, None, None, "СРЕДНЕВЗВЕШЕННАЯ ЦЕНА", bold=True, section=True)
+    rr_write_labels(ROW_PRICE_RES, None, None, None, "Средневзвешенная жилых, руб/м2")
+    rr_write_labels(ROW_PRICE_COM, None, None, None, "Средневзвешенная нежилых, руб/м2")
+    rr_write_labels(ROW_PRICE_STOR, None, None, None, "Средневзвешенная кладовых, руб/м2")
+    rr_write_labels(ROW_PRICE_PARK, None, None, None, "Паркинг, руб/м/м")
+    rr_write_data_row(ROW_PRICE_RES, lambda n: f"={price_apt_ref[n]}", fill_pm2=False, fmt=MONEY_FMT, total_mode="none")
+    rr_write_data_row(ROW_PRICE_COM, lambda n: f"={price_com_ref[n]}", fill_pm2=False, fmt=MONEY_FMT, total_mode="none")
+    rr_write_data_row(ROW_PRICE_STOR, lambda n: f"={price_storage_ref[n]}", fill_pm2=False, fmt=MONEY_FMT, total_mode="none")
+    rr_write_data_row(
+        ROW_PRICE_PARK,
+        lambda n: f'=IF({type_ref_cache[n]}="{TYPE_RESIDENTIAL}",{price_park_u_ref[n]},{price_park_g_ref[n]})',
+        fill_pm2=False, fmt=MONEY_FMT, total_mode="none",
+    )
+
+    # -- Выручка (доходы) --
+    ROW_REV_TOTAL, ROW_REV_RES, ROW_REV_COM, ROW_REV_STOR, ROW_REV_PARK = 21, 22, 23, 24, 25
+    rr_write_labels(ROW_REV_TOTAL, None, None, None, "ИТОГО ДОХОДЫ", bold=True)
+    rr_write_labels(ROW_REV_RES, None, None, None, "Доходы жилые, руб")
+    rr_write_labels(ROW_REV_COM, None, None, None, "Доходы нежилые, руб")
+    rr_write_labels(ROW_REV_STOR, None, None, None, "Доходы кладовые, руб")
+    rr_write_labels(ROW_REV_PARK, None, None, None, "Доходы паркинг, руб")
+    rev_b4 = f"'{HELPER_SHEET_NAME}'!$B$4"
+    rr_write_data_row(
+        ROW_REV_RES,
+        lambda n: f'=IF({type_ref_cache[n]}="{TYPE_RESIDENTIAL}",{apt_ref[n]}*{price_apt_ref[n]}*{rev_b4},0)',
+    )
+    rr_write_data_row(
+        ROW_REV_COM,
+        lambda n: f'=IF({type_ref_cache[n]}="{TYPE_RESIDENTIAL}",{com_ref[n]}*{price_com_ref[n]}*{rev_b4},0)',
+    )
+    rr_write_data_row(
+        ROW_REV_STOR,
+        lambda n: f'=IF({type_ref_cache[n]}="{TYPE_RESIDENTIAL}",{storage_ref[n]}*{price_storage_ref[n]}*{rev_b4},0)',
+    )
+    rr_write_data_row(
+        ROW_REV_PARK,
+        lambda n: (
+            f'=IF({type_ref_cache[n]}="{TYPE_RESIDENTIAL}",{park_u_ref[n]}*{price_park_u_ref[n]}*{rev_b4},'
+            f'{park_g_ref[n]}*{price_park_g_ref[n]}*{rev_b4})'
+        ),
+    )
+    rr_write_data_row(
+        ROW_REV_TOTAL,
+        lambda n: (
+            f"={get_column_letter(r_sum_col[n])}{ROW_REV_RES}+{get_column_letter(r_sum_col[n])}{ROW_REV_COM}"
+            f"+{get_column_letter(r_sum_col[n])}{ROW_REV_STOR}+{get_column_letter(r_sum_col[n])}{ROW_REV_PARK}"
+        ),
+        bold=True,
+    )
+
+    # -- Расходы: заголовки секции + сводные строки СМР/коробка --
+    ROW_SEC_EXPENSES, ROW_SEC_SMR = 27, 28
+    ROW_SMR_TOTAL, ROW_KOROBKA_TOTAL = 29, 30
+    rr_write_labels(ROW_SEC_EXPENSES, None, None, None, "РАСХОДЫ", bold=True, section=True)
+    rr_write_labels(ROW_SEC_SMR, None, None, None, "РАСХОДЫ по СМР", bold=True, section=True)
+    rr_write_labels(ROW_SMR_TOTAL, None, None, None, "СЕБЕСТОИМОСТЬ СМР, В Т.Ч.", bold=True)
+    rr_write_labels(ROW_KOROBKA_TOTAL, None, None, None, "СЕБЕСТОИМОСТЬ КОРОБКИ, В Т.Ч.", bold=True)
+    rr_write_data_row(
+        ROW_KOROBKA_TOTAL,
+        lambda n: f"={r_helper_ref('Себестоимость коробки (методика)', n)}",
+        bold=True,
+    )
+    rr_write_data_row(
+        ROW_SMR_TOTAL,
+        lambda n: (
+            f"={get_column_letter(r_sum_col[n])}{ROW_KOROBKA_TOTAL}+{r_helper_ref('Наружные работы блока (G), руб', n)}"
+        ),
+        bold=True,
+    )
+
+    # -- Каталог статей затрат (группы A-Z, иерархия из REPORT_ROWS) --
+    CATALOG_START_ROW = 31
+    catalog_children, catalog_source, catalog_rows_meta = {}, {}, []
+    row_cursor = CATALOG_START_ROW
+    cur_group_row, cur_subgroup_row = None, None
+    for level, letter, num1, num2, label, source in REPORT_ROWS:
+        catalog_rows_meta.append((row_cursor, level, letter, num1, num2, label))
+        catalog_source[row_cursor] = source
+        if level == "group":
+            cur_group_row = row_cursor
+            catalog_children[row_cursor] = []
+        elif level == "subgroup":
+            cur_subgroup_row = row_cursor
+            catalog_children[row_cursor] = []
+            catalog_children[cur_group_row].append(row_cursor)
+        else:  # leaf
+            parent = cur_group_row if num1 is None else cur_subgroup_row
+            catalog_children.setdefault(parent, []).append(row_cursor)
+        row_cursor += 1
+    catalog_end_row = row_cursor - 1
+
+    def catalog_formula(row, name):
+        source = catalog_source[row]
+        if source is not None:
+            return r_leaf_formula(source, name)
+        children = catalog_children.get(row) or []
+        if not children:
+            return 0
+        return "=SUM(" + ",".join(f"{get_column_letter(r_sum_col[name])}{cr}" for cr in children) + ")"
+
+    for row, level, letter, num1, num2, label in catalog_rows_meta:
+        rr_write_labels(row, letter, num1, num2, label, bold=(level in ("group", "subgroup")))
+        rr_write_data_row(row, (lambda name, row=row: catalog_formula(row, name)), bold=(level == "group"))
+
+    # -- Прямые/полные затраты, выручка, прибыль, рентабельность (по блокам и по проекту) --
+    ROW_SPACER_TAIL = catalog_end_row + 2
+    ROW_DIRECT = catalog_end_row + 3
+    ROW_ALLOC = catalog_end_row + 4
+    ROW_FULL = catalog_end_row + 5
+    ROW_REVENUE2 = catalog_end_row + 7
+    ROW_PROFIT = catalog_end_row + 8
+    ROW_MARGIN = catalog_end_row + 9
+    rr_write_labels(ROW_DIRECT, None, None, None, "ПРЯМЫЕ ЗАТРАТЫ", bold=True)
+    rr_write_labels(ROW_ALLOC, None, None, None, "АЛЛОЦИРОВАННЫЕ ЗАТРАТЫ (косвенные расходы)", bold=True)
+    rr_write_labels(ROW_FULL, None, None, None, "ПОЛНЫЕ ЗАТРАТЫ", bold=True)
+    rr_write_labels(ROW_REVENUE2, None, None, None, "ВЫРУЧКА", bold=True)
+    rr_write_labels(ROW_PROFIT, None, None, None, "ВАЛОВАЯ ПРИБЫЛЬ", bold=True)
+    rr_write_labels(ROW_MARGIN, None, None, None, "РЕНТАБЕЛЬНОСТЬ", bold=True)
+    rr_write_data_row(ROW_DIRECT, lambda n: f"={r_helper_ref('Прямые затраты', n)}", bold=True)
+    rr_write_data_row(ROW_ALLOC, lambda n: f"={r_helper_ref('Аллоцированные затраты', n)}", bold=True)
+    rr_write_data_row(ROW_FULL, lambda n: f"={r_helper_ref('Полные затраты', n)}", bold=True)
+    rr_write_data_row(ROW_REVENUE2, lambda n: f"={r_helper_ref('Выручка', n)}", bold=True)
+    rr_write_data_row(ROW_PROFIT, lambda n: f"={r_helper_ref('Валовая прибыль', n)}", bold=True)
+    rr_write_data_row(
+        ROW_MARGIN,
+        lambda n: f"={r_helper_ref('Рентабельность', n)}",
+        fill_pm2=False, bold=True, fmt=PERCENT_FMT,
+        total_mode="ref",
+        total_ref=(f"='{HELPER_SHEET_NAME}'!{COL['Рентабельность']}{total_row1}" if N_ROWS > 0 else 0),
+    )
+
+    report_last_row = ROW_MARGIN
+    logo_report = XLImage(PILImage.open(BytesIO(logo_bytes)))
+    logo_report.width, logo_report.height = 170, 32
+    ws_report.add_image(logo_report, f"{get_column_letter(n_cols_report + 2)}1")
+    ws_report.freeze_panes = ws_report.cell(row=ROW_SUBHDR + 1, column=FIRST_BLOCK_COL)
+
     # ------------------------------------------------------------------
     # Лист "Дашборд" — ключевые метрики проекта одним экраном (для ГД)
     # ------------------------------------------------------------------
@@ -2467,11 +2991,11 @@ def build_excel_report() -> bytes:
     for r in range(2, 6):
         ws_dash.row_dimensions[r].height = 20
 
-    ws_dash["B7"] = f'="Финансовая модель — "&\'{SHEET1_NAME}\'!A1'
+    ws_dash["B7"] = f'="Финансовая модель — "&\'{HELPER_SHEET_NAME}\'!A1'
     ws_dash["B7"].font = Font(name=XL_FONT, size=16, bold=True, color=XL_TEXT)
     ws_dash.merge_cells("B7:G7")
     ws_dash["B8"] = (
-        f'="Город: "&SUBSTITUTE(\'{SHEET1_NAME}\'!A2,"Город: ","")&"   |   "&\'{SHEET1_NAME}\'!A3'
+        f'="Город: "&SUBSTITUTE(\'{HELPER_SHEET_NAME}\'!A2,"Город: ","")&"   |   "&\'{HELPER_SHEET_NAME}\'!A3'
     )
     ws_dash["B8"].font = Font(name=XL_FONT, size=11, color=XL_TEXT2)
     ws_dash.merge_cells("B8:G8")
@@ -2483,12 +3007,12 @@ def build_excel_report() -> bytes:
     kpi_row = 10
     tile_h = 4
     tiles = [
-        ("Выручка", f"='{SHEET1_NAME}'!{COL['Выручка']}{total_row1}", MONEY_MM_FMT),
-        ("Полные затраты", f"='{SHEET1_NAME}'!{COL['Полные затраты']}{total_row1}", MONEY_MM_FMT),
-        ("Валовая прибыль", f"='{SHEET1_NAME}'!{COL['Валовая прибыль']}{total_row1}", MONEY_MM_FMT),
-        ("Рентабельность", f"='{SHEET1_NAME}'!{COL['Рентабельность']}{total_row1}", PERCENT_FMT),
-        ("NSA проекта, м2", f"='{SHEET1_NAME}'!{COL['NSA, м2']}{total_row1}", '#,##0 "м²"'),
-        ("Пул косвенных, база", "='" + SHEET1_NAME + "'!H4", MONEY_MM_FMT),
+        ("Выручка", f"='{HELPER_SHEET_NAME}'!{COL['Выручка']}{total_row1}", MONEY_MM_FMT),
+        ("Полные затраты", f"='{HELPER_SHEET_NAME}'!{COL['Полные затраты']}{total_row1}", MONEY_MM_FMT),
+        ("Валовая прибыль", f"='{HELPER_SHEET_NAME}'!{COL['Валовая прибыль']}{total_row1}", MONEY_MM_FMT),
+        ("Рентабельность", f"='{HELPER_SHEET_NAME}'!{COL['Рентабельность']}{total_row1}", PERCENT_FMT),
+        ("NSA проекта, м2", f"='{HELPER_SHEET_NAME}'!{COL['NSA, м2']}{total_row1}", '#,##0 "м²"'),
+        ("Пул косвенных, база", "='" + HELPER_SHEET_NAME + "'!H4", MONEY_MM_FMT),
     ]
     dash_cols = ["B", "C", "D", "E", "F", "G"]
     for col, (label, formula, fmt) in zip(dash_cols, tiles):
@@ -2558,19 +3082,19 @@ def build_excel_report() -> bytes:
         ws_dash[f"G{r}"].font = Font(name=XL_FONT, size=10, color=XL_TEXT)
 
     if N_ROWS > 0:
-        rng_park_u = f"'{SHEET1_NAME}'!${COL['Подземный паркинг, м/м']}${first_row1}:${COL['Подземный паркинг, м/м']}${last_row1}"
-        rng_park_u_rate = f"'{SHEET1_NAME}'!${COL['Ставка СМР подземного м/м, руб']}${first_row1}:${COL['Ставка СМР подземного м/м, руб']}${last_row1}"
-        rng_park_g = f"'{SHEET1_NAME}'!${COL['Наземный/Многоуровневый паркинг, м/м']}${first_row1}:${COL['Наземный/Многоуровневый паркинг, м/м']}${last_row1}"
-        rng_park_g_rate = f"'{SHEET1_NAME}'!${COL['Ставка СМР наземного м/м, руб']}${first_row1}:${COL['Ставка СМР наземного м/м, руб']}${last_row1}"
+        rng_park_u = f"'{HELPER_SHEET_NAME}'!${COL['Подземный паркинг, м/м']}${first_row1}:${COL['Подземный паркинг, м/м']}${last_row1}"
+        rng_park_u_rate = f"'{HELPER_SHEET_NAME}'!${COL['Ставка СМР подземного м/м, руб']}${first_row1}:${COL['Ставка СМР подземного м/м, руб']}${last_row1}"
+        rng_park_g = f"'{HELPER_SHEET_NAME}'!${COL['Наземный/Многоуровневый паркинг, м/м']}${first_row1}:${COL['Наземный/Многоуровневый паркинг, м/м']}${last_row1}"
+        rng_park_g_rate = f"'{HELPER_SHEET_NAME}'!${COL['Ставка СМР наземного м/м, руб']}${first_row1}:${COL['Ставка СМР наземного м/м, руб']}${last_row1}"
         parking_total_formula = (
-            f"=(SUMPRODUCT({rng_park_u},{rng_park_u_rate})+SUMPRODUCT({rng_park_g},{rng_park_g_rate}))*'{SHEET1_NAME}'!$E$4"
+            f"=(SUMPRODUCT({rng_park_u},{rng_park_u_rate})+SUMPRODUCT({rng_park_g},{rng_park_g_rate}))*'{HELPER_SHEET_NAME}'!$E$4"
         )
     else:
         parking_total_formula = 0
-    ws_dash[f"G{struct_row + 1}"] = f"='{SHEET1_NAME}'!{COL['Аллоцированные затраты']}{total_row1}"
-    ws_dash[f"G{struct_row + 2}"] = f"='{SHEET1_NAME}'!{COL['Себестоимость коробки (методика)']}{total_row1}"
-    ws_dash[f"G{struct_row + 3}"] = f"='{SHEET1_NAME}'!{COL['Наружные работы блока (G), руб']}{total_row1}"
-    ws_dash[f"G{struct_row + 4}"] = f"='{SHEET1_NAME}'!{COL['Прочие затраты блока (Z), руб']}{total_row1}"
+    ws_dash[f"G{struct_row + 1}"] = f"='{HELPER_SHEET_NAME}'!{COL['Аллоцированные затраты']}{total_row1}"
+    ws_dash[f"G{struct_row + 2}"] = f"='{HELPER_SHEET_NAME}'!{COL['Себестоимость коробки (методика)']}{total_row1}"
+    ws_dash[f"G{struct_row + 3}"] = f"='{HELPER_SHEET_NAME}'!{COL['Наружные работы блока (G), руб']}{total_row1}"
+    ws_dash[f"G{struct_row + 4}"] = f"='{HELPER_SHEET_NAME}'!{COL['Прочие затраты блока (Z), руб']}{total_row1}"
     ws_dash[f"G{struct_row + 5}"] = parking_total_formula
     for r in range(struct_row + 1, struct_row + 1 + len(cost_labels)):
         ws_dash[f"G{r}"].number_format = MONEY_MM_FMT
@@ -2609,6 +3133,14 @@ def build_excel_report() -> bytes:
     ws_dash.page_margins.right = 0.3
     ws_dash.page_margins.top = 0.3
     ws_dash.page_margins.bottom = 0.3
+
+    # ------------------------------------------------------------------
+    # Порядок листов: Дашборд, Экономика проекта, СМР по методике, затем
+    # скрытый служебный лист с данными по блокам.
+    # ------------------------------------------------------------------
+    desired_order = ["Дашборд", SHEET1_NAME, SHEET2_NAME, HELPER_SHEET_NAME]
+    wb._sheets = [wb[name] for name in desired_order if name in wb.sheetnames]
+    wb.active = 0
 
     buffer = io.BytesIO()
     wb.save(buffer)
