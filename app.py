@@ -1154,8 +1154,8 @@ with tab1:
             )
         elif is_tep_linked:
             help_text = (
-                "🔒 Вводится ниже, в блоке «Данные ЭП по каждому блоку» — здесь только "
-                "для просмотра, значение подтянется автоматически."
+                "🔒 Вводится на Вкладке 3, в блоке «Данные ЭП по каждому блоку» — здесь "
+                "только для просмотра, значение подтянется автоматически."
             )
         else:
             help_text = None
@@ -1205,68 +1205,12 @@ with tab1:
                 for _tep_col, _tep_default in _tep_defaults.items():
                     st.session_state.tep_store[_name].setdefault(_tep_col, _tep_default)
 
-    st.divider()
-    st.subheader("Данные ЭП по каждому жилому блоку")
-    if res_block_names:
-        if is_mp_stage:
-            st.caption(
-                "На этапе МП нужны только площади квартир/коммерции/кладовых (сюда "
-                "переносятся из таблицы объемов выше) и площадь участка блока (база для "
-                "наружных работ G). Поля для расчета по статьям A-E появятся при "
-                "переключении стадии на ЭП выше."
-            )
-            ep_cols_to_show = ALWAYS_VISIBLE_TEP_COLS
-        else:
-            st.caption(
-                "Передаются в таблицу объемов выше (там эти колонки нередактируемые) и "
-                "используются в расчете себестоимости коробки по статьям A-E (Вкладка 3)."
-            )
-            ep_cols_to_show = TEP_COLS + EXTRA_EP_PARAM_COLS
-
-        ep_df_view = pd.DataFrame([
-            {"Название блока": name, **st.session_state.tep_store[name]}
-            for name in res_block_names
-        ])
-        ep_column_config = {"Название блока": st.column_config.TextColumn(disabled=True)}
-        for _col in ep_cols_to_show:
-            ep_column_config[_col] = st.column_config.NumberColumn(min_value=0, format="localized")
-        ep_edited = st.data_editor(
-            ep_df_view,
-            use_container_width=True,
-            num_rows="fixed",
-            key="ep_editor",
-            column_order=["Название блока"] + ep_cols_to_show,
-            column_config=ep_column_config,
-        )
-        for _, _row in ep_edited.iterrows():
-            _name = _row["Название блока"]
-            for col in ep_cols_to_show:
-                st.session_state.tep_store[_name][col] = float(pd.to_numeric(_row[col], errors="coerce") or 0.0)
-    else:
-        st.info("Добавьте хотя бы один «Жилой блок» в таблице объемов выше, чтобы ввести данные ЭП.")
-
-# Данные ЭП — источник истины для соответствующих колонок таблицы блоков.
-# Площадь участка блока (и, на ЭП, остальные поля) пишутся в `blocks` независимо
-# от стадии — при переключении МП/ЭП уже введенные значения не теряются.
-for col in EXTRA_EP_PARAM_COLS + PARAM_COLS:
-    if col not in blocks.columns:
-        blocks[col] = 0.0
-for _i, _name in enumerate(blocks["Название блока"]):
-    if is_res[_i] and _name in st.session_state.tep_store:
-        store_row = st.session_state.tep_store[_name]
-        for tep_col, main_col in TEP_TO_MAIN_COL.items():
-            blocks.at[_i, main_col] = store_row[tep_col]
-        for col in EXTRA_EP_PARAM_COLS:
-            blocks.at[_i, col] = store_row[col]
-
-# Теперь в `blocks` подтянуты площади из блока ЭП — сохраняем таблицу объемов
-# с актуальными значениями в нередактируемых колонках (иначе они не обновлялись
-# бы на экране после ввода на ЭП-блоке).
-st.session_state.blocks_df = blocks[MAIN_TABLE_COLS].copy()
-
-# NSA нужна и для аллокации, и как база нескольких статей методики
-nsa = np.where(is_res, blocks["S квартир, м2"] + blocks["S коммерции 1 эт., м2"] + blocks["S кладовых, м2"], 0.0)
-blocks["NSA, м2"] = nsa
+    # Плейсхолдер-контейнер для блока «Экономика проекта» — по просьбе
+    # показываем его ТОЛЬКО на Вкладке 1 (не на Вкладках 2 и 3). Содержимое
+    # считается ниже по коду (после Вкладок 2-3, т.к. нужны цены и себестоимость
+    # СМР оттуда) и дописывается через `with econ_section:`, но место на
+    # странице — здесь, в конце Вкладки 1.
+    econ_section = st.container()
 
 # ------------------------------------------------------------------
 # ВКЛАДКА 2: коммерческие параметры (цены продаж) — Блок А (глобальные цены)
@@ -1381,6 +1325,69 @@ for _idx, _name in enumerate(res_block_names):
 with tab3:
     is_mp_stage = st.session_state.design_stage == STAGE_MP
     st.caption(f"Активная стадия проектирования: **{st.session_state.design_stage}** (переключается на Вкладке 1).")
+
+    st.subheader("Данные ЭП по каждому жилому блоку")
+    if res_block_names:
+        if is_mp_stage:
+            st.caption(
+                "На этапе МП нужны только площади квартир/коммерции/кладовых (сюда "
+                "переносятся из таблицы объемов на Вкладке 1) и площадь участка блока (база "
+                "для наружных работ G). Поля для расчета по статьям A-E появятся при "
+                "переключении стадии на ЭП на Вкладке 1."
+            )
+            ep_cols_to_show = ALWAYS_VISIBLE_TEP_COLS
+        else:
+            st.caption(
+                "Передаются в таблицу объемов на Вкладке 1 (там эти колонки нередактируемые) "
+                "и используются в расчете себестоимости коробки по статьям A-E ниже."
+            )
+            ep_cols_to_show = TEP_COLS + EXTRA_EP_PARAM_COLS
+
+        ep_df_view = pd.DataFrame([
+            {"Название блока": name, **st.session_state.tep_store[name]}
+            for name in res_block_names
+        ])
+        ep_column_config = {"Название блока": st.column_config.TextColumn(disabled=True)}
+        for _col in ep_cols_to_show:
+            ep_column_config[_col] = st.column_config.NumberColumn(min_value=0, format="localized")
+        ep_edited = st.data_editor(
+            ep_df_view,
+            use_container_width=True,
+            num_rows="fixed",
+            key="ep_editor",
+            column_order=["Название блока"] + ep_cols_to_show,
+            column_config=ep_column_config,
+        )
+        for _, _row in ep_edited.iterrows():
+            _name = _row["Название блока"]
+            for col in ep_cols_to_show:
+                st.session_state.tep_store[_name][col] = float(pd.to_numeric(_row[col], errors="coerce") or 0.0)
+    else:
+        st.info("Добавьте хотя бы один «Жилой блок» в таблице объемов на Вкладке 1, чтобы ввести данные ЭП.")
+    st.divider()
+
+    # Данные ЭП — источник истины для соответствующих колонок таблицы блоков.
+    # Площадь участка блока (и, на ЭП, остальные поля) пишутся в `blocks` независимо
+    # от стадии — при переключении МП/ЭП уже введенные значения не теряются.
+    for col in EXTRA_EP_PARAM_COLS + PARAM_COLS:
+        if col not in blocks.columns:
+            blocks[col] = 0.0
+    for _i, _name in enumerate(blocks["Название блока"]):
+        if is_res[_i] and _name in st.session_state.tep_store:
+            store_row = st.session_state.tep_store[_name]
+            for tep_col, main_col in TEP_TO_MAIN_COL.items():
+                blocks.at[_i, main_col] = store_row[tep_col]
+            for col in EXTRA_EP_PARAM_COLS:
+                blocks.at[_i, col] = store_row[col]
+
+    # Теперь в `blocks` подтянуты площади из блока ЭП — сохраняем таблицу объемов
+    # с актуальными значениями в нередактируемых колонках (иначе они не обновлялись
+    # бы на экране после ввода на ЭП-блоке).
+    st.session_state.blocks_df = blocks[MAIN_TABLE_COLS].copy()
+
+    # NSA нужна и для аллокации, и как база нескольких статей методики
+    nsa = np.where(is_res, blocks["S квартир, м2"] + blocks["S коммерции 1 эт., м2"] + blocks["S кладовых, м2"], 0.0)
+    blocks["NSA, м2"] = nsa
 
     st.subheader("Ставки СМР паркинга (для всех блоков)")
     st.caption(
@@ -1808,86 +1815,89 @@ avg_margin = (total_profit / total_revenue) if total_revenue > 0 else 0.0
 no_residential_warning = (blocks.shape[0] > 0) and (total_nsa == 0) and (indirect_pool_total > 0)
 
 # ======================================================================
-# 9. ОБЩИЙ БЛОК ПОД ВКЛАДКАМИ — ИТОГОВЫЕ МЕТРИКИ И ИНТЕРАКТИВНАЯ ГРАФИКА
-# (виден всегда, не привязан ни к одной из 3 вкладок ввода)
+# 9. ЭКОНОМИКА ПРОЕКТА — ИТОГОВЫЕ МЕТРИКИ И ИНТЕРАКТИВНАЯ ГРАФИКА
+# (по просьбе показывается ТОЛЬКО на Вкладке 1 — контейнер `econ_section`
+# зарезервировал место в конце Вкладки 1, содержимое дописывается сюда, т.к.
+# только здесь известны и цены (Вкладка 2), и себестоимость СМР (Вкладка 3))
 # ======================================================================
-st.divider()
-st.subheader(f"«{project_name}», {project_city} — сценарий «{scenario_name}»")
+with econ_section:
+    st.divider()
+    st.subheader(f"«{project_name}», {project_city} — сценарий «{scenario_name}»")
 
-if no_residential_warning:
-    st.warning(
-        "В таблице нет ни одного «Жилого блока» — пул косвенных расходов не на что "
-        "распределить, поэтому он не учтен в итогах проекта."
-    )
-
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Выручка проекта", f"{total_revenue:,.0f} руб".replace(",", " "))
-m2.metric("Затраты проекта", f"{total_cost:,.0f} руб".replace(",", " "))
-m3.metric("Валовая прибыль", f"{total_profit:,.0f} руб".replace(",", " "))
-m4.metric("Средняя рентабельность", f"{avg_margin * 100:.1f} %")
-
-st.markdown("**Экономика проекта по блокам**")
-tbl_cols = [
-    "Название блока", "Тип блока", "NSA, м2", "Доля аллокации",
-    "Прямые затраты", "Аллоцированные затраты", "Полные затраты",
-    "Выручка", "Валовая прибыль", "Рентабельность",
-]
-st.dataframe(
-    blocks[tbl_cols], use_container_width=True,
-    column_config={
-        "Доля аллокации": st.column_config.NumberColumn(format="percent"),
-        "Рентабельность": st.column_config.NumberColumn(format="percent"),
-        "Прямые затраты": st.column_config.NumberColumn(format="localized"),
-        "Аллоцированные затраты": st.column_config.NumberColumn(format="localized"),
-        "Полные затраты": st.column_config.NumberColumn(format="localized"),
-        "Выручка": st.column_config.NumberColumn(format="localized"),
-        "Валовая прибыль": st.column_config.NumberColumn(format="localized"),
-    },
-)
-
-chart_col1, chart_col2 = st.columns(2)
-with chart_col1:
-    fig_rev_cost = go.Figure()
-    fig_rev_cost.add_bar(name="Выручка", x=blocks["Название блока"], y=blocks["Выручка"], marker_color=f"#{COLOR_REVENUE}")
-    fig_rev_cost.add_bar(name="Полные затраты", x=blocks["Название блока"], y=blocks["Полные затраты"], marker_color=f"#{COLOR_COST}")
-    fig_rev_cost.update_layout(
-        title="Выручка vs Затраты по блокам", barmode="group",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0), margin=dict(t=60, b=40),
-    )
-    st.plotly_chart(fig_rev_cost, use_container_width=True)
-
-with chart_col2:
-    margin_colors = [f"#{COLOR_POSITIVE}" if v >= 0 else f"#{COLOR_NEGATIVE}" for v in blocks["Рентабельность"]]
-    fig_margin = go.Figure(
-        go.Bar(
-            x=blocks["Название блока"], y=blocks["Рентабельность"] * 100, marker_color=margin_colors,
-            text=[f"{v * 100:.1f}%" for v in blocks["Рентабельность"]], textposition="outside",
+    if no_residential_warning:
+        st.warning(
+            "В таблице нет ни одного «Жилого блока» — пул косвенных расходов не на что "
+            "распределить, поэтому он не учтен в итогах проекта."
         )
-    )
-    fig_margin.update_layout(title="Валовая рентабельность по блокам, %", yaxis_title="%", margin=dict(t=60, b=40))
-    fig_margin.add_hline(y=0, line_color="#898781", line_width=1)
-    st.plotly_chart(fig_margin, use_container_width=True)
 
-chart_col3, chart_col4 = st.columns(2)
-with chart_col3:
-    fig_pie = go.Figure(
-        go.Pie(
-            labels=list(revenue_components.keys()), values=list(revenue_components.values()),
-            marker=dict(colors=[f"#{c}" for c in PIE_COLORS]), hole=0.35,
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Выручка проекта", f"{total_revenue:,.0f} руб".replace(",", " "))
+    m2.metric("Затраты проекта", f"{total_cost:,.0f} руб".replace(",", " "))
+    m3.metric("Валовая прибыль", f"{total_profit:,.0f} руб".replace(",", " "))
+    m4.metric("Средняя рентабельность", f"{avg_margin * 100:.1f} %")
+
+    st.markdown("**Экономика проекта по блокам**")
+    tbl_cols = [
+        "Название блока", "Тип блока", "NSA, м2", "Доля аллокации",
+        "Прямые затраты", "Аллоцированные затраты", "Полные затраты",
+        "Выручка", "Валовая прибыль", "Рентабельность",
+    ]
+    st.dataframe(
+        blocks[tbl_cols], use_container_width=True,
+        column_config={
+            "Доля аллокации": st.column_config.NumberColumn(format="percent"),
+            "Рентабельность": st.column_config.NumberColumn(format="percent"),
+            "Прямые затраты": st.column_config.NumberColumn(format="localized"),
+            "Аллоцированные затраты": st.column_config.NumberColumn(format="localized"),
+            "Полные затраты": st.column_config.NumberColumn(format="localized"),
+            "Выручка": st.column_config.NumberColumn(format="localized"),
+            "Валовая прибыль": st.column_config.NumberColumn(format="localized"),
+        },
+    )
+
+    chart_col1, chart_col2 = st.columns(2)
+    with chart_col1:
+        fig_rev_cost = go.Figure()
+        fig_rev_cost.add_bar(name="Выручка", x=blocks["Название блока"], y=blocks["Выручка"], marker_color=f"#{COLOR_REVENUE}")
+        fig_rev_cost.add_bar(name="Полные затраты", x=blocks["Название блока"], y=blocks["Полные затраты"], marker_color=f"#{COLOR_COST}")
+        fig_rev_cost.update_layout(
+            title="Выручка vs Затраты по блокам", barmode="group",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0), margin=dict(t=60, b=40),
         )
-    )
-    fig_pie.update_layout(title="Структура выручки проекта (Итого)", margin=dict(t=60, b=20))
-    st.plotly_chart(fig_pie, use_container_width=True)
+        st.plotly_chart(fig_rev_cost, use_container_width=True)
 
-with chart_col4:
-    fig_cost_structure = go.Figure()
-    fig_cost_structure.add_bar(name="Прямые затраты", x=blocks["Название блока"], y=blocks["Прямые затраты"], marker_color=f"#{COLOR_DIRECT_COST}")
-    fig_cost_structure.add_bar(name="Аллоцированные затраты", x=blocks["Название блока"], y=blocks["Аллоцированные затраты"], marker_color=f"#{COLOR_ALLOC_COST}")
-    fig_cost_structure.update_layout(
-        title="Структура затрат по блокам", barmode="stack",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0), margin=dict(t=60, b=40),
-    )
-    st.plotly_chart(fig_cost_structure, use_container_width=True)
+    with chart_col2:
+        margin_colors = [f"#{COLOR_POSITIVE}" if v >= 0 else f"#{COLOR_NEGATIVE}" for v in blocks["Рентабельность"]]
+        fig_margin = go.Figure(
+            go.Bar(
+                x=blocks["Название блока"], y=blocks["Рентабельность"] * 100, marker_color=margin_colors,
+                text=[f"{v * 100:.1f}%" for v in blocks["Рентабельность"]], textposition="outside",
+            )
+        )
+        fig_margin.update_layout(title="Валовая рентабельность по блокам, %", yaxis_title="%", margin=dict(t=60, b=40))
+        fig_margin.add_hline(y=0, line_color="#898781", line_width=1)
+        st.plotly_chart(fig_margin, use_container_width=True)
+
+    chart_col3, chart_col4 = st.columns(2)
+    with chart_col3:
+        fig_pie = go.Figure(
+            go.Pie(
+                labels=list(revenue_components.keys()), values=list(revenue_components.values()),
+                marker=dict(colors=[f"#{c}" for c in PIE_COLORS]), hole=0.35,
+            )
+        )
+        fig_pie.update_layout(title="Структура выручки проекта (Итого)", margin=dict(t=60, b=20))
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    with chart_col4:
+        fig_cost_structure = go.Figure()
+        fig_cost_structure.add_bar(name="Прямые затраты", x=blocks["Название блока"], y=blocks["Прямые затраты"], marker_color=f"#{COLOR_DIRECT_COST}")
+        fig_cost_structure.add_bar(name="Аллоцированные затраты", x=blocks["Название блока"], y=blocks["Аллоцированные затраты"], marker_color=f"#{COLOR_ALLOC_COST}")
+        fig_cost_structure.update_layout(
+            title="Структура затрат по блокам", barmode="stack",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0), margin=dict(t=60, b=40),
+        )
+        st.plotly_chart(fig_cost_structure, use_container_width=True)
 
 # ======================================================================
 # 10. ЭКСПОРТ В EXCEL (openpyxl) — ЖИВЫЕ ФОРМУЛЫ, 2 ЛИСТА, ВСТРОЕННЫЕ ГРАФИКИ
