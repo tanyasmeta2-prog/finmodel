@@ -33,6 +33,8 @@
 import base64
 import io
 import json
+import re
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -570,9 +572,13 @@ def generate_default_table() -> pd.DataFrame:
 
 
 # ======================================================================
-# 3.5. АВТОСОХРАНЕНИЕ (переживает перезапуск страницы/приложения)
+# 3.5. СОХРАНЕНИЕ ПО ПОЛЬЗОВАТЕЛЮ И ПРОЕКТУ (переживает перезапуск страницы)
 # ======================================================================
-AUTOSAVE_PATH = Path(__file__).resolve().parent / "talan_model_autosave.json"
+# Каждое сохранение — отдельный файл, ключ = имя пользователя + название
+# проекта. Так несколько человек могут пользоваться моделью, не перезаписывая
+# данные друг друга, и держать несколько проектов одновременно.
+SAVES_DIR = Path(__file__).resolve().parent / "talan_model_saves"
+POINTER_PATH = Path(__file__).resolve().parent / "talan_model_last_opened.json"
 
 # Одиночные DataFrame
 _SAVE_DF_KEYS = ["blocks_df"]
@@ -587,6 +593,54 @@ _SAVE_PLAIN_KEYS = [
 ]
 # Динамически именуемые ключи (cascade-хранилища и значения "Блок А" по умолчанию)
 _SAVE_PREFIXES = ("_cascade_", "_price_default_", "_smr_parking_default_", "_mp_korobka_default")
+
+
+def _slugify(s: str) -> str:
+    """Имя пользователя/проекта -> безопасное имя файла."""
+    s = (s or "").strip()
+    s = re.sub(r"[^\w\-]+", "_", s, flags=re.UNICODE)
+    return s.strip("_") or "без_имени"
+
+
+def save_path_for(user_name: str, project_name: str) -> Path:
+    key = f"{_slugify(user_name)}__{_slugify(project_name)}"
+    return SAVES_DIR / f"{key}.json"
+
+
+def current_user_and_project() -> tuple:
+    return (
+        st.session_state.get("user_name_input", "").strip(),
+        st.session_state.get("project_name_input", "").strip(),
+    )
+
+
+def current_save_path():
+    user_name, project_name = current_user_and_project()
+    if not user_name or not project_name:
+        return None
+    return save_path_for(user_name, project_name)
+
+
+def list_saved_projects() -> list:
+    """Список всех сохранений (метаданные), новые сверху."""
+    if not SAVES_DIR.exists():
+        return []
+    items = []
+    for f in SAVES_DIR.glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            meta = data.get("_meta", {})
+            if meta.get("user_name") and meta.get("project_name"):
+                items.append({
+                    "user_name": meta["user_name"],
+                    "project_name": meta["project_name"],
+                    "saved_at": meta.get("saved_at", ""),
+                    "path": f,
+                })
+        except Exception:
+            continue
+    items.sort(key=lambda x: x["saved_at"], reverse=True)
+    return items
 
 
 def _autosave_collect() -> dict:
@@ -614,22 +668,33 @@ def _autosave_collect() -> dict:
     return data
 
 
-def autosave_write() -> None:
-    """Пишет текущее состояние на диск. Никогда не роняет приложение при ошибке."""
+def autosave_write(path: Path, user_name: str, project_name: str) -> None:
+    """Пишет текущее состояние на диск под данным путем. Никогда не роняет
+    приложение при ошибке."""
     try:
+        SAVES_DIR.mkdir(parents=True, exist_ok=True)
         data = _autosave_collect()
-        AUTOSAVE_PATH.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        data["_meta"] = {
+            "user_name": user_name,
+            "project_name": project_name,
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        POINTER_PATH.write_text(
+            json.dumps({"user_name": user_name, "project_name": project_name}, ensure_ascii=False),
+            encoding="utf-8",
+        )
     except Exception:
         pass
 
 
-def autosave_load() -> bool:
+def autosave_load(path: Path) -> bool:
     """Загружает сохраненное состояние в session_state ДО отрисовки виджетов.
     Возвращает True, если что-то было восстановлено."""
-    if not AUTOSAVE_PATH.exists():
+    if path is None or not path.exists():
         return False
     try:
-        data = json.loads(AUTOSAVE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return False
     try:
@@ -651,13 +716,65 @@ def autosave_load() -> bool:
             }
         for key, val in data.get("prefixed", {}).items():
             st.session_state[key] = val
+        meta = data.get("_meta", {})
+        if meta.get("user_name"):
+            st.session_state["user_name_input"] = meta["user_name"]
+        if meta.get("project_name"):
+            st.session_state["project_name_input"] = meta["project_name"]
         return True
     except Exception:
         return False
 
 
-if "_autosave_loaded" not in st.session_state:
-    st.session_state._autosave_loaded = autosave_load()
+def _read_pointer():
+    try:
+        return json.loads(POINTER_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+# При первом запуске сессии — пробуем подхватить последний открытый проект
+# (удобство для одного человека за компьютером). Дальше переключение — только
+# через выбор в боковой панели ниже, явным нажатием «Загрузить».
+if "_bootstrapped" not in st.session_state:
+    st.session_state["_bootstrapped"] = True
+    st.session_state["_autosave_loaded"] = False
+    pointer = _read_pointer()
+    if pointer and pointer.get("user_name") and pointer.get("project_name"):
+        p = save_path_for(pointer["user_name"], pointer["project_name"])
+        if autosave_load(p):
+            st.session_state["_autosave_loaded"] = True
+
+if "user_name_input" not in st.session_state:
+    st.session_state["user_name_input"] = ""
+
+with st.sidebar:
+    st.header("Проект")
+    _saves = list_saved_projects()
+    if _saves:
+        _options = ["— выбрать сохраненный проект —"] + [
+            f"{s['user_name']} — {s['project_name']}" for s in _saves
+        ]
+        _picked = st.selectbox("Открыть сохраненный проект", _options, key="_project_picker")
+        if _picked != _options[0]:
+            _picked_idx = _options.index(_picked) - 1
+            if st.button("📂 Загрузить"):
+                autosave_load(_saves[_picked_idx]["path"])
+                st.session_state["_autosave_loaded"] = True
+                st.rerun()
+    else:
+        st.caption("Пока нет сохраненных проектов.")
+    st.text_input(
+        "Ваше имя",
+        key="user_name_input",
+        help="Вместе с названием проекта (ниже) определяет, куда сохраняются данные.",
+    )
+    if not st.session_state["user_name_input"].strip():
+        st.caption("⚠️ Введите имя — иначе данные не будут сохраняться.")
+    elif st.session_state.get("_autosave_loaded"):
+        st.caption("💾 Данные восстановлены из сохранения")
+    else:
+        st.caption("💾 Автосохранение включено")
 
 
 # ======================================================================
@@ -700,7 +817,7 @@ def render_indirect_category(state_key: str, label: str, default_amount: float) 
             key=f"indirect_editor_{state_key}",
             column_config={
                 "Наименование": st.column_config.TextColumn(),
-                "Сумма, руб": st.column_config.NumberColumn(min_value=0, format="%,d"),
+                "Сумма, руб": st.column_config.NumberColumn(min_value=0, format="localized"),
             },
         )
         if len(edited) > MAX_INDIRECT_ITEMS:
@@ -753,19 +870,13 @@ if "indirect_items" not in st.session_state:
     st.session_state.indirect_items = {}  # ключ раздела -> DataFrame статей (Наименование, Сумма)
 
 with st.sidebar:
-    if st.session_state.get("_autosave_loaded"):
-        st.caption("💾 Данные восстановлены из автосохранения")
-    else:
-        st.caption("💾 Автосохранение включено")
-    with st.expander("Сбросить проект"):
-        st.caption("Удаляет все введенные данные без возможности восстановления.")
+    with st.expander("Сбросить текущий ввод"):
+        st.caption(
+            "Очищает данные на экране (для ввода нового проекта). "
+            "Уже сохраненные проекты на диске не удаляются."
+        )
         confirm_reset = st.checkbox("Подтверждаю сброс", key="_confirm_reset")
         if st.button("🗑️ Начать новый проект", disabled=not confirm_reset):
-            try:
-                if AUTOSAVE_PATH.exists():
-                    AUTOSAVE_PATH.unlink()
-            except Exception:
-                pass
             st.session_state.clear()
             st.rerun()
 
@@ -852,18 +963,29 @@ with tab1:
     )
 
     tep_linked_cols = set(TEP_TO_MAIN_COL.values()) & set(MAIN_TABLE_COLS)
+    NAZEMNY_PARKING_COL = "Наземный/Многоуровневый паркинг, м/м"
     column_config = {
         "Название блока": st.column_config.TextColumn(required=True),
         "Тип блока": st.column_config.SelectboxColumn(options=BLOCK_TYPES, required=True),
     }
     for col in MAIN_TABLE_NUMERIC_COLS:
         is_tep_linked = col in tep_linked_cols
-        column_config[col] = st.column_config.NumberColumn(
-            min_value=0, format="%,d", disabled=is_tep_linked,
-            help=(
+        if col == NAZEMNY_PARKING_COL:
+            help_text = (
+                "Только для строк с типом блока «Наземный/Многоуровневый паркинг» — "
+                "отдельно стоящий паркинг считается своей строкой. В составе жилого "
+                "блока это поле не используется и обнуляется — там учитывается только "
+                "подземный паркинг."
+            )
+        elif is_tep_linked:
+            help_text = (
                 "🔒 Вводится ниже, в блоке «Данные ЭП по каждому блоку» — здесь только "
                 "для просмотра, значение подтянется автоматически."
-            ) if is_tep_linked else None,
+            )
+        else:
+            help_text = None
+        column_config[col] = st.column_config.NumberColumn(
+            min_value=0, format="localized", disabled=is_tep_linked, help=help_text,
         )
 
     edited = st.data_editor(
@@ -888,6 +1010,11 @@ with tab1:
 
     is_res = (blocks["Тип блока"] == TYPE_RESIDENTIAL)
     is_park = (blocks["Тип блока"] == TYPE_PARKING)
+
+    # Наземный/многоуровневый паркинг — только для строк с типом «Паркинг» (отдельно
+    # стоящий паркинг). В составе жилого блока не используется — обнуляем, даже если
+    # что-то введено по ошибке. В жилом блоке остается только подземный паркинг.
+    blocks.loc[is_res, NAZEMNY_PARKING_COL] = 0.0
 
     res_block_names = list(blocks.loc[is_res, "Название блока"])
     st.session_state.tep_store = {k: v for k, v in st.session_state.tep_store.items() if k in res_block_names}
@@ -927,7 +1054,7 @@ with tab1:
         ])
         ep_column_config = {"Название блока": st.column_config.TextColumn(disabled=True)}
         for _col in ep_cols_to_show:
-            ep_column_config[_col] = st.column_config.NumberColumn(min_value=0, format="%,d")
+            ep_column_config[_col] = st.column_config.NumberColumn(min_value=0, format="localized")
         ep_edited = st.data_editor(
             ep_df_view,
             use_container_width=True,
@@ -1004,7 +1131,7 @@ with tab2:
         price_df = cascade_table_df(price_store, all_block_names, PRICE_COLS)
         price_column_config = {"Название блока": st.column_config.TextColumn(disabled=True)}
         for col in PRICE_COLS:
-            price_column_config[col] = st.column_config.NumberColumn(format="%,d")
+            price_column_config[col] = st.column_config.NumberColumn(format="localized")
         price_edited = st.data_editor(
             price_df, use_container_width=True, num_rows="fixed",
             key="price_editor", column_config=price_column_config,
@@ -1104,7 +1231,7 @@ with tab3:
         parking_rate_df = cascade_table_df(parking_rate_store, all_block_names, SMR_PARKING_RATE_COLS)
         parking_rate_column_config = {"Название блока": st.column_config.TextColumn(disabled=True)}
         for col in SMR_PARKING_RATE_COLS:
-            parking_rate_column_config[col] = st.column_config.NumberColumn(format="%,d")
+            parking_rate_column_config[col] = st.column_config.NumberColumn(format="localized")
         parking_rate_edited = st.data_editor(
             parking_rate_df, use_container_width=True, num_rows="fixed",
             key="parking_rate_editor", column_config=parking_rate_column_config,
@@ -1132,7 +1259,7 @@ with tab3:
                 key="mp_korobka_editor",
                 column_config={
                     "Название блока": st.column_config.TextColumn(disabled=True),
-                    "Ставка, руб/м2 NSA": st.column_config.NumberColumn(format="%,d"),
+                    "Ставка, руб/м2 NSA": st.column_config.NumberColumn(format="localized"),
                 },
             )
             cascade_save("mp_korobka", korobka_edited, ["Ставка, руб/м2 NSA"])
@@ -1170,7 +1297,7 @@ with tab3:
                     "Группа": st.column_config.TextColumn(disabled=True),
                     "Единица измерения": st.column_config.TextColumn(disabled=True),
                     "_basis": None,  # служебная колонка — скрыта
-                    "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%,d"),
+                    "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="localized"),
                 },
             )
             st.session_state.block_rates[selected_block] = block_rates_edited
@@ -1203,7 +1330,7 @@ with tab3:
                 "Код": st.column_config.TextColumn(disabled=True),
                 "Статья затрат": st.column_config.TextColumn(disabled=True),
                 "Единица измерения": st.column_config.TextColumn(disabled=True),
-                "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%,d"),
+                "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="localized"),
             },
         )
         st.session_state.block_g_area[selected_block] = g_area_edited
@@ -1219,7 +1346,7 @@ with tab3:
                 "Статья затрат": st.column_config.TextColumn(disabled=True),
                 "Единица измерения": st.column_config.TextColumn(disabled=True),
                 "Кол-во": st.column_config.NumberColumn(min_value=0, format="%.1f"),
-                "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="%,d"),
+                "Ставка, руб/ед.": st.column_config.NumberColumn(min_value=0, format="localized"),
             },
         )
         st.session_state.block_g_length[selected_block] = g_length_edited
@@ -1254,7 +1381,7 @@ with tab3:
             column_config={
                 "Код": st.column_config.TextColumn(disabled=True),
                 "Статья затрат": st.column_config.TextColumn(disabled=True),
-                "Сумма, руб": st.column_config.NumberColumn(min_value=0, format="%,d"),
+                "Сумма, руб": st.column_config.NumberColumn(min_value=0, format="localized"),
             },
         )
         st.session_state.block_z_fixed[selected_block] = z_fixed_edited
@@ -1316,8 +1443,8 @@ with tab3:
     st.dataframe(
         smr_result_df, use_container_width=True,
         column_config={
-            "Себестоимость коробки, руб": st.column_config.NumberColumn(format="%,d"),
-            "Эффективная ставка, руб/м2": st.column_config.NumberColumn(format="%,d"),
+            "Себестоимость коробки, руб": st.column_config.NumberColumn(format="localized"),
+            "Эффективная ставка, руб/м2": st.column_config.NumberColumn(format="localized"),
         },
     )
 
@@ -1439,8 +1566,8 @@ with tab3:
     st.dataframe(
         gz_table, use_container_width=True,
         column_config={
-            "Наружные работы блока (G), руб": st.column_config.NumberColumn(format="%,d"),
-            "Прочие затраты блока (Z), руб": st.column_config.NumberColumn(format="%,d"),
+            "Наружные работы блока (G), руб": st.column_config.NumberColumn(format="localized"),
+            "Прочие затраты блока (Z), руб": st.column_config.NumberColumn(format="localized"),
         },
     )
 
@@ -1535,11 +1662,11 @@ st.dataframe(
     column_config={
         "Доля аллокации": st.column_config.NumberColumn(format="percent"),
         "Рентабельность": st.column_config.NumberColumn(format="percent"),
-        "Прямые затраты": st.column_config.NumberColumn(format="%,d"),
-        "Аллоцированные затраты": st.column_config.NumberColumn(format="%,d"),
-        "Полные затраты": st.column_config.NumberColumn(format="%,d"),
-        "Выручка": st.column_config.NumberColumn(format="%,d"),
-        "Валовая прибыль": st.column_config.NumberColumn(format="%,d"),
+        "Прямые затраты": st.column_config.NumberColumn(format="localized"),
+        "Аллоцированные затраты": st.column_config.NumberColumn(format="localized"),
+        "Полные затраты": st.column_config.NumberColumn(format="localized"),
+        "Выручка": st.column_config.NumberColumn(format="localized"),
+        "Валовая прибыль": st.column_config.NumberColumn(format="localized"),
     },
 )
 
@@ -2500,4 +2627,7 @@ st.download_button(
 # ======================================================================
 # АВТОСОХРАНЕНИЕ ТЕКУЩЕГО СОСТОЯНИЯ (в конце каждого rerun)
 # ======================================================================
-autosave_write()
+_save_user, _save_project = current_user_and_project()
+_save_path = current_save_path()
+if _save_path is not None:
+    autosave_write(_save_path, _save_user, _save_project)
