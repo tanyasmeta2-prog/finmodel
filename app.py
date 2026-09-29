@@ -318,7 +318,72 @@ TALAN_LOGO_PNG_B64 = (
 # ======================================================================
 # 1. НАСТРОЙКИ СТРАНИЦЫ И СЦЕНАРИИ
 # ======================================================================
-st.set_page_config(page_title="Финмодель девелоперского проекта", layout="wide")
+# Фирменный стиль Талан для веб-интерфейса (тот же принцип, что в макетах
+# экранов генератора посадок, раздел 6.10 ТЗ): белый фон, Талан-зелёный
+# #41AA37 — акценты и рамки, тёмно-зелёный #2E7D27 — кнопки и шапки
+# (контраст белого текста). Использует те же цвета, что уже зашиты в
+# Excel-экспорт (XL_GREEN/XL_GREEN_DARK и логотип TALAN_LOGO_PNG_B64) —
+# единый фирменный стиль в вебе и в выгрузке.
+TALAN_UI_GREEN = f"#{XL_GREEN}"       # 41AA37
+TALAN_UI_GREEN_DARK = "#2E7D27"       # тёмно-зелёный (кнопки, шапки)
+_talan_logo_bytes = base64.b64decode(TALAN_LOGO_PNG_B64)
+_talan_logo_icon = PILImage.open(io.BytesIO(_talan_logo_bytes))
+
+st.set_page_config(
+    page_title="Финмодель девелоперского проекта",
+    page_icon=_talan_logo_icon,
+    layout="wide",
+)
+
+st.markdown(
+    f"""
+    <style>
+    :root {{
+        --talan-green: {TALAN_UI_GREEN};
+        --talan-green-dark: {TALAN_UI_GREEN_DARK};
+    }}
+    /* Кнопки (в т.ч. скачивание) — тёмно-зелёный фон, белый текст */
+    .stButton > button, .stDownloadButton > button, .stFormSubmitButton > button {{
+        background-color: var(--talan-green-dark);
+        color: #FFFFFF;
+        border: 1px solid var(--talan-green-dark);
+        border-radius: 6px;
+    }}
+    .stButton > button:hover, .stDownloadButton > button:hover, .stFormSubmitButton > button:hover {{
+        background-color: var(--talan-green);
+        border-color: var(--talan-green);
+        color: #FFFFFF;
+    }}
+    .stButton > button:disabled, .stDownloadButton > button:disabled {{
+        background-color: #CECECE;
+        border-color: #CECECE;
+        color: #FFFFFF;
+    }}
+    /* Активная вкладка — акцент Талан-зелёным */
+    .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {{
+        border-bottom-color: var(--talan-green) !important;
+    }}
+    .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] p {{
+        color: var(--talan-green-dark) !important;
+        font-weight: 600;
+    }}
+    /* Значения метрик — акцент тёмно-зелёным */
+    [data-testid="stMetricValue"] {{
+        color: var(--talan-green-dark);
+    }}
+    /* Сайдбар — светлый фон с зелёной рамкой (по мотивам макета «Боковая панель») */
+    [data-testid="stSidebar"] {{
+        background-color: #FAFAFA;
+        border-right: 2px solid var(--talan-green);
+    }}
+    /* Прогресс-бар и слайдеры — фирменный зелёный */
+    .stProgress > div > div > div > div {{
+        background-color: var(--talan-green);
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 TYPE_RESIDENTIAL = "Жилой блок"
 TYPE_PARKING = "Наземный/Многоуровневый паркинг"
@@ -913,6 +978,8 @@ if "user_name_input" not in st.session_state:
     st.session_state["user_name_input"] = ""
 
 with st.sidebar:
+    st.image(_talan_logo_bytes, width=160)
+    st.divider()
     st.header("Проект")
     _saves = list_saved_projects()
     if _saves:
