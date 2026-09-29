@@ -42,6 +42,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.io as pio
 import requests
 import streamlit as st
 from PIL import Image as PILImage
@@ -404,6 +405,18 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# Шаблон графиков Plotly в фирменном стиле (шрифт Source Sans 3, как в интерфейсе)
+pio.templates["talan"] = go.layout.Template(layout=dict(
+    font=dict(family="'Source Sans', 'Source Sans 3', 'Source Sans Pro', sans-serif", size=13, color="#1F1F1F"),
+    title=dict(font=dict(size=15, color="#1F1F1F", weight=700), x=0, xanchor="left"),
+    colorway=["#41AA37", "#A6A6A6", "#2E7D27", "#84D26D", "#AE4B67", "#B2DAAE"],
+    paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF",
+    xaxis=dict(gridcolor="#EFEFEF", linecolor="#BDBDBD", zerolinecolor="#BDBDBD"),
+    yaxis=dict(gridcolor="#EFEFEF", linecolor="#BDBDBD", zerolinecolor="#BDBDBD"),
+    separators=", ",
+))
+pio.templates.default = "plotly_white+talan"
 
 TYPE_RESIDENTIAL = "Жилой блок"
 TYPE_PARKING = "Наземный/Многоуровневый паркинг"
@@ -2361,39 +2374,55 @@ with tab5:
             "Доля аллокации": 1.0 if total_nsa > 0 else 0.0,
             **{_c: _res_view[_c].sum() for _c in _money_cols}, "Валовая рентабельность": avg_margin}
     _res_view = pd.concat([_res_view, pd.DataFrame([_tot])], ignore_index=True)
+    def _ru(v, d=1):
+        return f"{v:,.{d}f}".replace(",", " ").replace(".", ",")
+
+    _last = len(_res_view) - 1
+    _styler = (
+        _res_view.style
+        .format({
+            "NSA, м2": lambda v: _ru(v, 0),
+            "Доля аллокации": lambda v: _ru(v * 100, 1) + " %",
+            "Валовая рентабельность": lambda v: _ru(v * 100, 1) + " %",
+            **{_c: (lambda v: _ru(v, 1)) for _c in _money_cols},
+        })
+        .apply(lambda r: ["background-color: #EEF7EC; color: #2E7D27" if r.name == _last else "" for _ in r], axis=1)
+        .map(lambda v: "color: #AE4B67" if isinstance(v, (int, float)) and v < 0 else "",
+             subset=["Валовая прибыль", "Валовая рентабельность"])
+    )
     st.dataframe(
-        _res_view, width="stretch", hide_index=True,
+        _styler, width="stretch", hide_index=True,
         column_config={
             "Название блока": st.column_config.TextColumn("Блок"),
             "Тип блока": st.column_config.TextColumn("Тип"),
-            "NSA, м2": st.column_config.NumberColumn("NSA, м²", format="localized"),
-            "Доля аллокации": st.column_config.NumberColumn("Доля", format="percent"),
-            "Валовая рентабельность": st.column_config.NumberColumn("Вал. рентаб.", format="percent"),
-            "Прямые затраты": st.column_config.NumberColumn("Прямые, млн ₽", format="%.1f"),
-            "Аллоцированные затраты": st.column_config.NumberColumn("Косвенные, млн ₽", format="%.1f"),
-            "Полные затраты": st.column_config.NumberColumn("Полные, млн ₽", format="%.1f"),
-            "Выручка": st.column_config.NumberColumn("Выручка, млн ₽", format="%.1f"),
-            "Валовая прибыль": st.column_config.NumberColumn("Вал. прибыль, млн ₽", format="%.1f"),
+            "NSA, м2": st.column_config.NumberColumn("NSA, м²"),
+            "Доля аллокации": st.column_config.NumberColumn("Доля"),
+            "Валовая рентабельность": st.column_config.NumberColumn("Вал. рентаб."),
+            "Прямые затраты": st.column_config.NumberColumn("Прямые, млн ₽"),
+            "Аллоцированные затраты": st.column_config.NumberColumn("Косвенные, млн ₽"),
+            "Полные затраты": st.column_config.NumberColumn("Полные, млн ₽"),
+            "Выручка": st.column_config.NumberColumn("Выручка, млн ₽"),
+            "Валовая прибыль": st.column_config.NumberColumn("Вал. прибыль, млн ₽"),
         },
     )
-    _chart_layout = dict(height=300, margin=dict(t=48, b=24, l=8, r=8),
+    _chart_layout = dict(template="plotly_white+talan", plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF", height=300, margin=dict(t=48, b=24, l=8, r=8),
                          legend=dict(orientation="h", yanchor="top", y=-0.12, xanchor="left", x=0))
     c1, c2 = st.columns(2)
     with c1:
         fig_rev_cost = go.Figure()
-        fig_rev_cost.add_bar(name="Выручка", x=blocks["Название блока"], y=blocks["Выручка"], marker_color=f"#{COLOR_REVENUE}")
-        fig_rev_cost.add_bar(name="Полные затраты", x=blocks["Название блока"], y=blocks["Полные затраты"], marker_color=f"#{COLOR_COST}")
-        fig_rev_cost.update_layout(title="Выручка и затраты по блокам", barmode="group", **_chart_layout)
-        st.plotly_chart(fig_rev_cost, width="stretch")
+        fig_rev_cost.add_bar(name="Выручка", x=blocks["Название блока"], y=blocks["Выручка"] / 1e6, marker_color=f"#{COLOR_REVENUE}")
+        fig_rev_cost.add_bar(name="Полные затраты", x=blocks["Название блока"], y=blocks["Полные затраты"] / 1e6, marker_color=f"#{COLOR_COST}")
+        fig_rev_cost.update_layout(title="Выручка и затраты по блокам, млн ₽", barmode="group", **_chart_layout)
+        st.plotly_chart(fig_rev_cost, width="stretch", theme=None)
     with c2:
         margin_colors = [f"#{COLOR_POSITIVE}" if v >= 0 else f"#{COLOR_NEGATIVE}" for v in blocks["Валовая рентабельность"]]
         fig_margin = go.Figure(go.Bar(
             x=blocks["Название блока"], y=blocks["Валовая рентабельность"] * 100, marker_color=margin_colors,
-            text=[f"{v * 100:.1f}%" for v in blocks["Валовая рентабельность"]], textposition="outside",
+            text=[f"{v * 100:.1f} %".replace(".", ",") for v in blocks["Валовая рентабельность"]], textposition="outside",
         ))
         fig_margin.update_layout(title="Валовая рентабельность по блокам, %", yaxis_title="%", **_chart_layout)
         fig_margin.add_hline(y=0, line_color="#898781", line_width=1)
-        st.plotly_chart(fig_margin, width="stretch")
+        st.plotly_chart(fig_margin, width="stretch", theme=None)
 
     def _stack_chart(title: str, parts: dict, colors: list):
         total = sum(v for v in parts.values() if v > 0)
@@ -2402,14 +2431,14 @@ with tab5:
             pct = (v / total * 100) if total > 0 else 0.0
             fig.add_bar(name=f"{lbl} {pct:.0f}%", x=[pct], y=[""], orientation="h", marker_color=f"#{col}",
                         hovertemplate=f"{lbl}: {fmt_money(v)} ₽ ({pct:.1f}%)<extra></extra>")
-        fig.update_layout(title=title, barmode="stack", height=190, margin=dict(t=48, b=8, l=8, r=8),
+        fig.update_layout(template="plotly_white+talan", plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF", title=title, barmode="stack", height=190, margin=dict(t=48, b=8, l=8, r=8),
                           xaxis=dict(range=[0, 100], ticksuffix="%"),
                           legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="left", x=0))
         return fig
 
     c3, c4 = st.columns(2)
     with c3:
-        st.plotly_chart(_stack_chart("Структура выручки", revenue_components, PIE_COLORS), width="stretch")
+        st.plotly_chart(_stack_chart("Структура выручки", revenue_components, PIE_COLORS), width="stretch", theme=None)
     with c4:
         cost_parts = {
             "Коробка": float(smr_korobka_scaled.sum()),
@@ -2422,7 +2451,7 @@ with tab5:
         st.plotly_chart(
             _stack_chart("Структура полных затрат", cost_parts,
                          [PALETTE["green_dark"], PALETTE["green"], PALETTE["green2"], PALETTE["bordo"], PALETTE["green3"], PALETTE["gray"]]),
-            width="stretch",
+            width="stretch", theme=None,
         )
     if not is_mp_stage and res_block_names:
         with st.expander("Детализация коробки по статьям A–E и блокам"):
