@@ -34,6 +34,7 @@ import base64
 import io
 import json
 import re
+import threading
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -41,6 +42,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 from PIL import Image as PILImage
 
@@ -57,22 +59,23 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 # 0. ЦВЕТОВАЯ ПАЛИТРА (фиксированный порядок слотов — единая для веб- и
 #    Excel-графиков)
 # ======================================================================
+# Фирменная палитра Талан для веб-графиков Plotly (те же цвета, что в Excel).
 PALETTE = {
-    "blue": "2a78d6", "orange": "eb6834", "aqua": "1baf7a", "yellow": "eda100",
-    "magenta": "e87ba4", "violet": "4a3aa7", "red": "e34948", "green": "008300",
+    "green": "41AA37", "green_dark": "2E7D27", "green2": "84D26D", "green3": "B2DAAE",
+    "bordo": "AE4B67", "gray": "A6A6A6",
 }
-COLOR_REVENUE = PALETTE["blue"]
-COLOR_COST = PALETTE["orange"]
-COLOR_POSITIVE = PALETTE["blue"]
-COLOR_NEGATIVE = PALETTE["red"]
-COLOR_DIRECT_COST = PALETTE["blue"]
-COLOR_ALLOC_COST = PALETTE["violet"]
-PIE_COLORS = [PALETTE["blue"], PALETTE["orange"], PALETTE["aqua"], PALETTE["yellow"], PALETTE["magenta"]]
-GROUP_COLORS = [PALETTE["blue"], PALETTE["orange"], PALETTE["aqua"], PALETTE["yellow"], PALETTE["magenta"]]
+COLOR_REVENUE = PALETTE["green"]
+COLOR_COST = PALETTE["gray"]
+COLOR_POSITIVE = PALETTE["green"]
+COLOR_NEGATIVE = PALETTE["bordo"]
+COLOR_DIRECT_COST = PALETTE["green"]
+COLOR_ALLOC_COST = PALETTE["green2"]
+PIE_COLORS = [PALETTE["green"], PALETTE["green_dark"], PALETTE["green2"], PALETTE["bordo"], PALETTE["gray"]]
+GROUP_COLORS = [PALETTE["green"], PALETTE["green_dark"], PALETTE["green2"], PALETTE["green3"], PALETTE["bordo"]]
 
 # ----------------------------------------------------------------------
-# Фирменные цвета Талан — ТОЛЬКО для Excel-отчета (веб-графики Plotly выше
-# используют свою палитру PALETTE и не меняются).
+# Фирменные цвета Талан для Excel-отчета (веб-графики Plotly — PALETTE выше,
+# те же фирменные цвета).
 # ----------------------------------------------------------------------
 XL_GREEN = "41AA37"
 XL_GREEN2 = "84D26D"
@@ -805,8 +808,21 @@ def generate_default_table() -> pd.DataFrame:
 # Каждое сохранение — отдельный файл, ключ = имя пользователя + название
 # проекта. Так несколько человек могут пользоваться моделью, не перезаписывая
 # данные друг друга, и держать несколько проектов одновременно.
+#
+# Хранилище:
+#   • Яндекс Диск — если в Streamlit Secrets задан YANDEX_DISK_TOKEN (OAuth-токен
+#     приложения с правом «Доступ к папке приложения на Диске»). Файлы лежат в
+#     «Приложения / <имя приложения> / projects». Запись идет в фоне (не тормозит
+#     интерфейс), только при изменении данных.
+#   • Локальная папка рядом с app.py — если токена нет (запуск на своем ПК).
+#     На Streamlit Cloud локальный диск временный — данные теряются при
+#     перезапуске, поэтому там нужен Яндекс Диск.
 SAVES_DIR = Path(__file__).resolve().parent / "talan_model_saves"
 POINTER_PATH = Path(__file__).resolve().parent / "talan_model_last_opened.json"
+YA_API = "https://cloud-api.yandex.net/v1/disk/resources"
+YA_FOLDER = "app:/projects"
+YA_TIMEOUT = 20  # сек на один HTTP-запрос
+YA_LIST_TTL = 20  # сек — кэш списка проектов в сессии
 
 # Одиночные DataFrame
 _SAVE_DF_KEYS = ["blocks_df"]
@@ -831,9 +847,179 @@ def _slugify(s: str) -> str:
     return s.strip("_") or "без_имени"
 
 
-def save_path_for(user_name: str, project_name: str) -> Path:
-    key = f"{_slugify(user_name)}__{_slugify(project_name)}"
-    return SAVES_DIR / f"{key}.json"
+def _json_default(o):
+    """numpy-числа и прочее -> JSON."""
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        return float(o)
+    if isinstance(o, np.ndarray):
+        return o.tolist()
+    return str(o)
+
+
+def _ya_token():
+    try:
+        tok = st.secrets.get("YANDEX_DISK_TOKEN")
+    except Exception:
+        return None
+    return str(tok).strip() if tok else None
+
+
+YA_TOKEN = _ya_token()
+STORAGE_MODE = "yadisk" if YA_TOKEN else "local"
+
+
+# ---------------------------- Яндекс Диск ------------------------------
+def _ya_headers():
+    return {"Authorization": f"OAuth {YA_TOKEN}"}
+
+
+def _ya_check(resp, ok=(200, 201, 202, 204)):
+    if resp.status_code not in ok:
+        try:
+            msg = resp.json().get("message") or resp.text
+        except Exception:
+            msg = resp.text
+        raise RuntimeError(f"Яндекс Диск: HTTP {resp.status_code} — {msg}")
+    return resp
+
+
+def _ya_ensure_folder():
+    r = requests.put(YA_API, params={"path": YA_FOLDER}, headers=_ya_headers(), timeout=YA_TIMEOUT)
+    _ya_check(r, ok=(201, 409))  # 409 — папка уже есть
+
+
+def _ya_upload(name: str, text: str, meta: dict):
+    path = f"{YA_FOLDER}/{name}"
+    r = requests.get(
+        f"{YA_API}/upload", params={"path": path, "overwrite": "true"},
+        headers=_ya_headers(), timeout=YA_TIMEOUT,
+    )
+    if r.status_code == 409:  # нет папки — создаем и повторяем
+        _ya_ensure_folder()
+        r = requests.get(
+            f"{YA_API}/upload", params={"path": path, "overwrite": "true"},
+            headers=_ya_headers(), timeout=YA_TIMEOUT,
+        )
+    href = _ya_check(r).json()["href"]
+    _ya_check(requests.put(href, data=text.encode("utf-8"), timeout=YA_TIMEOUT * 3))
+    # имя пользователя/проекта кладем в свойства файла — список проектов
+    # строится одним запросом, без скачивания каждого файла
+    _ya_check(requests.patch(
+        YA_API, params={"path": path}, headers=_ya_headers(),
+        json={"custom_properties": {k: str(v) for k, v in meta.items()}}, timeout=YA_TIMEOUT,
+    ))
+
+
+def _ya_download(name: str) -> str:
+    r = requests.get(
+        f"{YA_API}/download", params={"path": f"{YA_FOLDER}/{name}"},
+        headers=_ya_headers(), timeout=YA_TIMEOUT,
+    )
+    href = _ya_check(r).json()["href"]
+    r2 = _ya_check(requests.get(href, timeout=YA_TIMEOUT * 3))
+    return r2.content.decode("utf-8")
+
+
+def _ya_list() -> list:
+    r = requests.get(
+        YA_API,
+        params={
+            "path": YA_FOLDER, "limit": 1000,
+            "fields": "_embedded.items.name,_embedded.items.type,_embedded.items.modified,"
+                      "_embedded.items.custom_properties",
+        },
+        headers=_ya_headers(), timeout=YA_TIMEOUT,
+    )
+    if r.status_code == 404:  # папки еще нет — сохранений нет
+        return []
+    items = []
+    for it in _ya_check(r).json().get("_embedded", {}).get("items", []):
+        if it.get("type") != "file" or not it.get("name", "").endswith(".json"):
+            continue
+        props = it.get("custom_properties") or {}
+        if props.get("user_name") and props.get("project_name"):
+            items.append({
+                "user_name": props["user_name"],
+                "project_name": props["project_name"],
+                "saved_at": props.get("saved_at") or it.get("modified", ""),
+                "ref": it["name"],
+            })
+    return items
+
+
+def _ya_delete(name: str):
+    r = requests.delete(
+        YA_API, params={"path": f"{YA_FOLDER}/{name}", "permanently": "true"},
+        headers=_ya_headers(), timeout=YA_TIMEOUT,
+    )
+    _ya_check(r, ok=(202, 204, 404))
+
+
+class _YaWriter:
+    """Фоновая запись на Яндекс Диск: интерфейс не ждет сети. По каждому файлу
+    хранится только последняя версия (промежуточные правки не отправляются)."""
+
+    def __init__(self):
+        self.cond = threading.Condition()
+        self.pending = {}  # имя файла -> (текст, meta)
+        self.in_flight = {}  # имя файла -> текст, который пишется прямо сейчас
+        self.errors = {}  # имя файла -> текст последней ошибки
+        self.last_ok = {}  # имя файла -> время последней успешной записи
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def submit(self, name, text, meta):
+        with self.cond:
+            self.pending[name] = (text, meta)
+            self.cond.notify()
+
+    def latest_text(self, name):
+        """Самая свежая версия, еще не дошедшая до Диска (для чтения своих правок)."""
+        with self.cond:
+            if name in self.pending:
+                return self.pending[name][0]
+            return self.in_flight.get(name)
+
+    def forget(self, name):
+        with self.cond:
+            self.pending.pop(name, None)
+            self.errors.pop(name, None)
+
+    def busy(self):
+        with self.cond:
+            return bool(self.pending or self.in_flight)
+
+    def _run(self):
+        while True:
+            with self.cond:
+                while not self.pending:
+                    self.cond.wait()
+                name, (text, meta) = next(iter(self.pending.items()))
+                del self.pending[name]
+                self.in_flight[name] = text
+            try:
+                _ya_upload(name, text, meta)
+                with self.cond:
+                    self.errors.pop(name, None)
+                    self.last_ok[name] = datetime.now().strftime("%H:%M:%S")
+            except Exception as e:  # сеть/токен — сохраняем ошибку, повтор при следующей правке
+                with self.cond:
+                    self.errors[name] = str(e)[:300]
+            finally:
+                with self.cond:
+                    self.in_flight.pop(name, None)
+
+
+@st.cache_resource
+def _get_ya_writer():
+    return _YaWriter()
+
+
+# ------------------------ общий интерфейс хранилища ---------------------
+def save_path_for(user_name: str, project_name: str) -> str:
+    """Имя файла сохранения (одинаково для Яндекс Диска и локальной папки)."""
+    return f"{_slugify(user_name)}__{_slugify(project_name)}.json"
 
 
 def current_user_and_project() -> tuple:
@@ -850,8 +1036,26 @@ def current_save_path():
     return save_path_for(user_name, project_name)
 
 
+def _invalidate_list_cache():
+    st.session_state.pop("_saves_cache", None)
+
+
 def list_saved_projects() -> list:
     """Список всех сохранений (метаданные), новые сверху."""
+    if STORAGE_MODE == "yadisk":
+        cache = st.session_state.get("_saves_cache")
+        if cache and (datetime.now().timestamp() - cache[0]) < YA_LIST_TTL:
+            return cache[1]
+        try:
+            items = _ya_list()
+            st.session_state.pop("_storage_error", None)
+        except Exception as e:
+            st.session_state["_storage_error"] = str(e)[:300]
+            items = cache[1] if cache else []
+        items.sort(key=lambda x: x["saved_at"], reverse=True)
+        st.session_state["_saves_cache"] = (datetime.now().timestamp(), items)
+        return items
+
     if not SAVES_DIR.exists():
         return []
     items = []
@@ -864,12 +1068,27 @@ def list_saved_projects() -> list:
                     "user_name": meta["user_name"],
                     "project_name": meta["project_name"],
                     "saved_at": meta.get("saved_at", ""),
-                    "path": f,
+                    "ref": f.name,
                 })
         except Exception:
             continue
     items.sort(key=lambda x: x["saved_at"], reverse=True)
     return items
+
+
+def storage_delete(ref: str) -> None:
+    if STORAGE_MODE == "yadisk":
+        _get_ya_writer().forget(ref)
+        try:
+            _ya_delete(ref)
+        except Exception as e:
+            st.session_state["_storage_error"] = str(e)[:300]
+        _invalidate_list_cache()
+        return
+    try:
+        (SAVES_DIR / ref).unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _autosave_collect() -> dict:
@@ -897,33 +1116,63 @@ def _autosave_collect() -> dict:
     return data
 
 
-def autosave_write(path: Path, user_name: str, project_name: str) -> None:
-    """Пишет текущее состояние на диск под данным путем. Никогда не роняет
-    приложение при ошибке."""
+def autosave_write(ref: str, user_name: str, project_name: str) -> None:
+    """Сохраняет текущее состояние, только если оно изменилось с прошлой записи.
+    Никогда не роняет приложение при ошибке."""
     try:
-        SAVES_DIR.mkdir(parents=True, exist_ok=True)
         data = _autosave_collect()
-        data["_meta"] = {
+        body = json.dumps(data, ensure_ascii=False, default=_json_default, sort_keys=True)
+        sig = (ref, user_name, project_name, hash(body))
+        if st.session_state.get("_last_saved_sig") == sig:
+            return
+        meta = {
             "user_name": user_name,
             "project_name": project_name,
             "saved_at": datetime.now().isoformat(timespec="seconds"),
         }
-        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        POINTER_PATH.write_text(
-            json.dumps({"user_name": user_name, "project_name": project_name}, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        data["_meta"] = meta
+        text = json.dumps(data, ensure_ascii=False, default=_json_default)
+        if STORAGE_MODE == "yadisk":
+            _get_ya_writer().submit(ref, text, meta)
+            cache = st.session_state.get("_saves_cache")
+            if cache and not any(s["ref"] == ref for s in cache[1]):
+                _invalidate_list_cache()  # новый проект — обновим список
+        else:
+            SAVES_DIR.mkdir(parents=True, exist_ok=True)
+            (SAVES_DIR / ref).write_text(text, encoding="utf-8")
+            POINTER_PATH.write_text(
+                json.dumps({"user_name": user_name, "project_name": project_name}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        st.session_state["_last_saved_sig"] = sig
     except Exception:
         pass
 
 
-def autosave_load(path: Path) -> bool:
+def _storage_read(ref: str):
+    if STORAGE_MODE == "yadisk":
+        text = _get_ya_writer().latest_text(ref)
+        if text is not None:
+            return text
+        try:
+            return _ya_download(ref)
+        except Exception as e:
+            st.session_state["_storage_error"] = str(e)[:300]
+            return None
+    p = SAVES_DIR / ref
+    return p.read_text(encoding="utf-8") if p.exists() else None
+
+
+def autosave_load(ref: str) -> bool:
     """Загружает сохраненное состояние в session_state ДО отрисовки виджетов.
     Возвращает True, если что-то было восстановлено."""
-    if path is None or not path.exists():
+    if ref is None:
         return False
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        text = _storage_read(ref)
+        if text is None:
+            return False
+        data = json.loads(text)
     except Exception:
         return False
     try:
@@ -962,17 +1211,18 @@ def _read_pointer():
         return None
 
 
-# При первом запуске сессии — пробуем подхватить последний открытый проект
-# (удобство для одного человека за компьютером). Дальше переключение — только
-# через выбор в боковой панели ниже, явным нажатием «Загрузить».
+# При первом запуске сессии (только локальный режим, один человек за ПК) —
+# подхватываем последний открытый проект. На общем Яндекс Диске так не делаем:
+# коллега не должен открыть чужой проект — выбор только в боковой панели.
 if "_bootstrapped" not in st.session_state:
     st.session_state["_bootstrapped"] = True
     st.session_state["_autosave_loaded"] = False
-    pointer = _read_pointer()
-    if pointer and pointer.get("user_name") and pointer.get("project_name"):
-        p = save_path_for(pointer["user_name"], pointer["project_name"])
-        if autosave_load(p):
-            st.session_state["_autosave_loaded"] = True
+    if STORAGE_MODE == "local":
+        pointer = _read_pointer()
+        if pointer and pointer.get("user_name") and pointer.get("project_name"):
+            p = save_path_for(pointer["user_name"], pointer["project_name"])
+            if autosave_load(p):
+                st.session_state["_autosave_loaded"] = True
 
 if "user_name_input" not in st.session_state:
     st.session_state["user_name_input"] = ""
@@ -993,27 +1243,27 @@ with st.sidebar:
             col_load, col_del = st.columns(2)
             with col_load:
                 if st.button("📂 Загрузить"):
-                    autosave_load(_picked_save["path"])
-                    st.session_state["_autosave_loaded"] = True
+                    if autosave_load(_picked_save["ref"]):
+                        st.session_state["_autosave_loaded"] = True
+                        st.session_state.pop("_last_saved_sig", None)
                     st.rerun()
             with col_del:
                 _confirm_del = st.checkbox("Точно удалить", key="_confirm_delete_save")
                 if st.button("🗑️ Удалить", disabled=not _confirm_del):
-                    try:
-                        _picked_save["path"].unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                    pointer = _read_pointer()
-                    if (
-                        pointer
-                        and pointer.get("user_name") == _picked_save["user_name"]
-                        and pointer.get("project_name") == _picked_save["project_name"]
-                    ):
-                        try:
-                            POINTER_PATH.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                    storage_delete(_picked_save["ref"])
+                    if STORAGE_MODE == "local":
+                        pointer = _read_pointer()
+                        if (
+                            pointer
+                            and pointer.get("user_name") == _picked_save["user_name"]
+                            and pointer.get("project_name") == _picked_save["project_name"]
+                        ):
+                            try:
+                                POINTER_PATH.unlink(missing_ok=True)
+                            except Exception:
+                                pass
                     st.session_state.pop("_confirm_delete_save", None)
+                    st.session_state.pop("_last_saved_sig", None)
                     st.rerun()
     else:
         st.caption("Пока нет сохраненных проектов.")
@@ -1028,6 +1278,23 @@ with st.sidebar:
         st.caption("💾 Данные восстановлены из сохранения")
     else:
         st.caption("💾 Автосохранение включено")
+
+    if STORAGE_MODE == "yadisk":
+        _cur_ref = current_save_path()
+        _writer = _get_ya_writer()
+        _err = _writer.errors.get(_cur_ref) if _cur_ref else None
+        _err = _err or st.session_state.get("_storage_error")
+        if _err:
+            st.error(f"Яндекс Диск: ошибка сохранения или чтения — {_err}")
+        elif _cur_ref and _cur_ref in _writer.last_ok:
+            st.caption(f"☁️ Яндекс Диск — сохранено в {_writer.last_ok[_cur_ref]}")
+        else:
+            st.caption("☁️ Хранилище: Яндекс Диск")
+    else:
+        st.caption(
+            "🖥️ Хранилище: локальная папка. На Streamlit Cloud данные теряются при "
+            "перезапуске — задайте YANDEX_DISK_TOKEN в Secrets."
+        )
 
 
 # ======================================================================
@@ -1145,7 +1412,7 @@ with st.sidebar:
         "Только затраты, ОБЩИЕ на весь участок (не привязаны к конкретному УБ) — "
         "распределяется на «Жилые блоки» пропорц. NSA. Локальные затраты на участок "
         "под каждым УБ (благоустройство, сети, генподряд и т.п.) считаются по блокам "
-        "на вкладке «СМР по методике» (коды G и Z) и сюда не входят. Раскройте раздел, "
+        "на вкладке «3. Себестоимость СМР» (коды G и Z) и сюда не входят. Раскройте раздел, "
         "чтобы расписать его на отдельные статьи (до 10 на раздел) — суммируются "
         "автоматически."
     )
@@ -1234,7 +1501,7 @@ with tab1:
             )
         elif is_tep_linked:
             help_text = (
-                "🔒 Вводится на Вкладке 3, в блоке «Данные ЭП по каждому блоку» — здесь "
+                "🔒 Вводится на Вкладке 3, в блоке «Данные ЭП по каждому жилому блоку» — здесь "
                 "только для просмотра, значение подтянется автоматически."
             )
         else:
@@ -1410,8 +1677,8 @@ with tab3:
     if res_block_names:
         if is_mp_stage:
             st.caption(
-                "На этапе МП нужны только площади квартир/коммерции/кладовых (сюда "
-                "переносятся из таблицы объемов на Вкладке 1) и площадь участка блока (база "
+                "На этапе МП нужны только площади квартир/коммерции/кладовых (вводятся здесь "
+                "и передаются в таблицу объемов на Вкладке 1) и площадь участка блока (база "
                 "для наружных работ G). Поля для расчета по статьям A-E появятся при "
                 "переключении стадии на ЭП на Вкладке 1."
             )
@@ -1577,7 +1844,7 @@ with tab3:
         st.caption(
             "Считаются на локальном участке ПОД ЭТИМ БЛОКОМ (весь участок делится на "
             "небольшие участки под каждым УБ). Статьи на площадь участка считаются от "
-            "площади участка блока (вкладка «Исходные данные», ЭП) — кол-во там не "
+            "площади участка блока (блок «Данные ЭП» вверху этой вкладки) — кол-во здесь не "
             "редактируется, только ставка. Автостоянки (G.20.20) не включены — паркинг "
             "уже учтен по блокам."
         )
@@ -1629,7 +1896,10 @@ with tab3:
             column_config={
                 "Код": st.column_config.TextColumn(disabled=True),
                 "Статья затрат": st.column_config.TextColumn(disabled=True),
-                "Ставка, доля от СМР+G": st.column_config.NumberColumn(min_value=0, max_value=1, format="%.3f"),
+                "Ставка, доля от СМР+G": st.column_config.NumberColumn(
+                    "Ставка, доля от базы (коробка + G + подз. паркинг)",
+                    min_value=0, max_value=1, format="%.3f",
+                ),
             },
         )
         st.session_state.block_z_pct[selected_block] = z_pct_edited
@@ -2502,7 +2772,7 @@ def build_excel_report() -> bytes:
     # каждый жилой блок; % статьи считаются от базы (коробка блока + G блока).
     # ------------------------------------------------------------------
     z_pct_title_row = g_length_last_row + 2
-    ws2.cell(row=z_pct_title_row, column=1, value="Прочие затраты, связанные с СМР (код Z) — % от базы (коробка блока + G блока)")
+    ws2.cell(row=z_pct_title_row, column=1, value="Прочие затраты, связанные с СМР (код Z) — % от базы (коробка + G + подземный паркинг блока)")
     ws2.cell(row=z_pct_title_row, column=1).font = PARAM_FONT
     z_pct_header_row = z_pct_title_row + 1
     rate_col_for_z_pct = {name: get_column_letter(3 + idx) for idx, name in enumerate(res_block_names)}
@@ -3342,7 +3612,7 @@ def build_excel_report() -> bytes:
 excel_bytes = build_excel_report()
 st.divider()
 st.download_button(
-    label="📥 Скачать отчет в Excel (2 листа, живые формулы + графики)",
+    label="📥 Скачать отчет в Excel (Дашборд, Экономика проекта, СМР по методике — живые формулы + графики)",
     data=excel_bytes,
     file_name=f"financial_model_{scenario_name}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
