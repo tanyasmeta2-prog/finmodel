@@ -527,6 +527,7 @@ ITEMS_G_AREA = [
     ("G.10.30", "Земляные работы по подготовке площадки", "площадь участка, га", 650_000),
     ("G.10.50", "Инженерная подготовка территории", "площадь участка, га", 400_000),
     ("G.20.10", "Дороги", "площадь участка, га", 3_500_000),
+    ("G.20.30", "Пешеходные дороги", "площадь участка, га", 0),
     ("G.20.40", "МАФ, детские площадки, ограждение", "площадь участка, га", 1_200_000),
     ("G.20.50", "Озеленение", "площадь участка, га", 900_000),
     ("G.40.20", "Наружное освещение", "площадь участка, га", 350_000),
@@ -569,6 +570,7 @@ ITEMS_Z_FIXED = [
     ("Z.10.50", "Услуги сторонних организаций (межевание, кадастр, ТУ)", 8_000_000),
     ("Z.10.60", "Проектирование, изыскания, авторский надзор", 45_000_000),
     ("Z.150", "Технологическое присоединение", 25_000_000),
+    ("Z.50.50", "Оформление объекта (постановление, кадастр, регистрация, межевание)", 0),
 ]
 DEFAULT_Z_FIXED_DF = pd.DataFrame(
     [{"Код": c, "Статья затрат": n, "Сумма, руб": 0.0} for c, n, s in ITEMS_Z_FIXED]
@@ -694,7 +696,7 @@ REPORT_ROWS = [
     ("subgroup", "G", 20, None, "Благоустройство и озеленение", None),
     ("leaf", "G", 20, 10, "Дороги", ("G_AREA", "G.20.10")),
     ("leaf", "G", 20, 20, "Автостоянки", None),
-    ("leaf", "G", 20, 30, "Пешеходные дороги", None),
+    ("leaf", "G", 20, 30, "Пешеходные дороги", ("G_AREA", "G.20.30")),
     ("leaf", "G", 20, 40, "МАФ, оборудование детских площадок, постоянный забор", ("G_AREA", "G.20.40")),
     ("leaf", "G", 20, 50, "Озеленение", ("G_AREA", "G.20.50")),
     ("subgroup", "G", 30, None, "Наружные трубопроводы", None),
@@ -728,7 +730,7 @@ REPORT_ROWS = [
     ("leaf", "Z", 50, 20, "Покупка объекта недвижимости (земля, недострой)", None),
     ("leaf", "Z", 50, 30, "Арендные платежи и расходы по регистрации договора аренды зем.участка", None),
     ("leaf", "Z", 50, 40, "Отселение/снос строений", None),
-    ("leaf", "Z", 50, 50, "Оформление объекта (постановление, кадастр, регистрация, межевание)", None),
+    ("leaf", "Z", 50, 50, "Оформление объекта (постановление, кадастр, регистрация, межевание)", ("Z_FIXED", "Z.50.50")),
     ("subgroup", "Z", 150, None, "Технологическое присоединение", ("Z_FIXED", "Z.150")),
     ("leaf", "Z", 150, 10, "Технологическое присоединение водопровод", None),
     ("leaf", "Z", 150, 20, "Технологическое присоединение хозбытовая канализация", None),
@@ -1447,6 +1449,766 @@ def render_indirect_category(state_key: str, label: str, default_amount: float) 
 
 
 # ======================================================================
+# 3.7. ШАБЛОН EXCEL: ЗАГРУЗКА ДАННЫХ ПРОЕКТА И ВЫГРУЗКА В ШАБЛОН
+# ======================================================================
+# Один файл .xlsx заполняет все вкладки модели. Листы:
+#   «Проект» — наименование, город, стадия, сценарий;
+#   «Блоки» — строка на урбан-блок: тип, площади, м/м, участок, цены, ставки
+#             МП и паркинга, параметры ЭП;
+#   «Статьи СМР» — ставки/суммы по кодам методики (A–E, G, Z) по блокам;
+#   «Инфраструктура» — статьи Z.50.10 по блокам;
+#   «Косвенные» — пул косвенных расходов проекта по разделам;
+#   «Справочник кодов» — какие коды принимаются и что в них вводить.
+TPL_SHEET_PROJECT = "Проект"
+TPL_SHEET_BLOCKS = "Блоки"
+TPL_SHEET_ITEMS = "Статьи СМР"
+TPL_SHEET_INFRA = "Инфраструктура"
+TPL_SHEET_INDIRECT = "Косвенные"
+TPL_SHEET_CODES = "Справочник кодов"
+
+TPL_TYPE_ALIASES = {
+    "жилой": TYPE_RESIDENTIAL, "жилой блок": TYPE_RESIDENTIAL,
+    "паркинг": TYPE_PARKING, "наземный паркинг": TYPE_PARKING, "многоуровневый паркинг": TYPE_PARKING,
+    TYPE_PARKING.lower(): TYPE_PARKING,
+}
+# (заголовок колонки листа «Блоки», куда пишется, ключ)
+TPL_BLOCK_COLS = [
+    ("Название блока", "name", None),
+    ("Тип блока", "type", None),
+    ("Площадь квартир, м2", "tep", "Общая площадь квартир (с летними, с коэф.), м2"),
+    ("Площадь коммерции, м2", "tep", "Площадь коммерции, м2"),
+    ("Площадь кладовых, м2", "tep", "Площадь кладовых в доме, м2"),
+    ("Подземный паркинг, м/м", "main", "Подземный паркинг, м/м"),
+    ("Наземный/многоуровневый паркинг, м/м", "main", "Наземный/Многоуровневый паркинг, м/м"),
+    ("Площадь участка блока, га", "tep", "Площадь участка блока, га"),
+    ("Цена жилья, руб/м2", "price", "Цена жилья, руб/м2"),
+    ("Цена коммерции, руб/м2", "price", "Цена коммерции, руб/м2"),
+    ("Цена кладовых, руб/м2", "price", "Цена кладовых, руб/м2"),
+    ("Цена подземного м/м, руб", "price", "Цена подземного м/м, руб"),
+    ("Цена наземного м/м, руб", "price", "Цена наземного м/м, руб"),
+    ("Ставка коробки МП, руб/м2 NSA", "mp", "Ставка, руб/м2 NSA"),
+    ("Ставка СМР подземного м/м, руб", "park", "Ставка СМР подземного м/м, руб"),
+    ("Ставка СМР наземного м/м, руб", "park", "Ставка СМР наземного м/м, руб"),
+    ("Ставка СМР коммерции паркинга, руб/м2", "park", "Ставка СМР коммерции паркинга, руб/м2"),
+    ("Ставка СМР кладовых паркинга, руб/м2", "park", "Ставка СМР кладовых паркинга, руб/м2"),
+    ("ЭП: кол-во секций, шт", "tep", "Кол-во секций, шт"),
+    ("ЭП: кол-во квартир, шт", "tep", "Кол-во квартир, шт"),
+    ("ЭП: кол-во лифтов, шт", "tep", "Кол-во лифтов, шт"),
+    ("ЭП: остановок лифтов, шт", "stops", None),
+    ("ЭП: площадь застройки, м2", "tep", "Площадь застройки, м2"),
+    ("ЭП: площадь фасада, м2", "tep", "Площадь фасада, м2"),
+    ("ЭП: остекление окон, м2", "tep", "Площадь остекления окон, м2"),
+    ("ЭП: остекление лоджий, м2", "tep", "Площадь остекления лоджий, м2"),
+    ("ЭП: объем ниже 0, м3", "tep", "Объем здания ниже 0, м3"),
+    ("ЭП: объем выше 0, м3", "tep", "Объем здания выше 0, м3"),
+]
+TPL_ITEM_COLS = ["Блок", "Код", "Статья (справочно)", "Кол-во", "Ставка / доля / сумма"]
+TPL_INDIRECT_SECTIONS = {
+    "land": "Земля",
+    "infra": "Магистральные сети (на весь участок)",
+    "landscape": "Благоустройство мест общего пользования",
+    "social": "Социальные объекты (школы/сады)",
+    "soft": "Прочие Soft Costs",
+}
+# Применимость цен/ставок по типу блока (в неприменимых ячейках — база, чтобы
+# таблица «База + блоки» не показывала ложное «изменено вручную»)
+_PRICE_APPLIES = {
+    "Цена жилья, руб/м2": {TYPE_RESIDENTIAL}, "Цена подземного м/м, руб": {TYPE_RESIDENTIAL},
+    "Цена наземного м/м, руб": {TYPE_PARKING},
+    "Цена коммерции, руб/м2": {TYPE_RESIDENTIAL, TYPE_PARKING}, "Цена кладовых, руб/м2": {TYPE_RESIDENTIAL, TYPE_PARKING},
+}
+_PARK_APPLIES = {
+    "Ставка СМР подземного м/м, руб": {TYPE_RESIDENTIAL},
+    "Ставка СМР наземного м/м, руб": {TYPE_PARKING},
+    "Ставка СМР коммерции паркинга, руб/м2": {TYPE_PARKING},
+    "Ставка СМР кладовых паркинга, руб/м2": {TYPE_PARKING},
+}
+_CODE_KIND = {}  # код -> (вид, наименование, что вводить)
+for _c, _n, _g, _u, _b, _r in ITEMS:
+    _CODE_KIND[_c] = ("ITEMS", _n, f"ставка, {_u} (стадия ЭП)")
+for _c, _n, _u, _r in ITEMS_G_AREA:
+    _CODE_KIND[_c] = ("G_AREA", _n, "ставка, руб/га площади участка блока")
+for _c, _n, _u, _q, _r in ITEMS_G_LENGTH:
+    _CODE_KIND[_c] = ("G_LENGTH", _n, f"кол-во ({_u}) и ставка, руб/ед.")
+for _c, _n, _r in ITEMS_Z_PCT:
+    _CODE_KIND[_c] = ("Z_PCT", _n, "доля от базы Z (0,08 = 8 %)")
+for _c, _n, _s in ITEMS_Z_FIXED:
+    _CODE_KIND[_c] = ("Z_FIXED", _n, "сумма, руб")
+
+
+def _norm_code(code) -> str:
+    """«А.10.10» (кириллица), «a 10 10», «Z.150.10» -> код каталога модели."""
+    s = str(code or "").strip().upper()
+    s = s.translate(str.maketrans({"А": "A", "В": "B", "С": "C", "Е": "E", "Д": "D"}))
+    s = re.sub(r"[\s,;/]+", ".", s).strip(".")
+    if s in _CODE_KIND:
+        return s
+    if s.startswith("Z.150"):
+        return "Z.150"
+    return s
+
+
+def _xl_num(v) -> float:
+    if v is None or v == "":
+        return 0.0
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(str(v).replace(" ", "").replace(" ", "").replace(",", "."))
+    except ValueError:
+        return 0.0
+
+
+def _tpl_style_header(ws, n_cols, row=1):
+    for c in range(1, n_cols + 1):
+        cell = ws.cell(row=row, column=c)
+        cell.fill = PatternFill(start_color="41AA37", end_color="41AA37", fill_type="solid")
+        cell.font = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
+    ws.row_dimensions[row].height = 42
+
+
+def collect_template_data() -> dict:
+    """Текущий проект из session_state -> структура шаблона (для выгрузки)."""
+    ss = st.session_state
+    bdf = ss.get("blocks_df")
+    data = {
+        "project": {
+            "Наименование проекта": ss.get("project_name_input", ""),
+            "Город": ss.get("project_city_input", ""),
+            "Стадия (МП/ЭП)": "МП" if ss.get("design_stage") == STAGE_MP else "ЭП",
+            "Сценарий": ss.get("scenario_select", "Базовый"),
+        },
+        "blocks": [], "items": [], "infra": [], "indirect": [],
+    }
+    if bdf is None:
+        return data
+    prices = ss.get("_cascade_prices", {})
+    parks = ss.get("_cascade_smr_parking", {})
+    for _, row in bdf.iterrows():
+        name, btype = str(row["Название блока"]), row["Тип блока"]
+        tep = ss.get("tep_store", {}).get(name, {})
+        rec = {}
+        for hdr, kind, key in TPL_BLOCK_COLS:
+            if kind == "name":
+                v = name
+            elif kind == "type":
+                v = btype
+            elif kind == "tep":
+                v = tep.get(key, 0.0)
+            elif kind == "main":
+                v = row.get(key, 0.0)
+            elif kind == "price":
+                v = prices.get(name, {}).get(key, ss.get(f"_price_default_{key}", 0.0))
+            elif kind == "park":
+                v = parks.get(name, {}).get(key, ss.get(f"_smr_parking_default_{key}", 0.0))
+            elif kind == "mp":
+                v = ss.get("block_mp_rate", {}).get(name, 0.0) if btype == TYPE_RESIDENTIAL else 0.0
+            elif kind == "stops":
+                v = ss.get("block_elevator_stops", {}).get(name, 0.0)
+            rec[hdr] = v
+        data["blocks"].append(rec)
+        # Статьи СМР — только ненулевые
+        if btype == TYPE_RESIDENTIAL and name in ss.get("block_rates", {}):
+            for _, r in ss["block_rates"][name].iterrows():
+                v = _xl_num(r["Ставка, руб/ед."])
+                if v:
+                    data["items"].append([name, r["Код"], r["Статья затрат"], None, v])
+        for store, qcol, vcol in [("block_g_area", None, "Ставка, руб/ед."), ("block_g_length", "Кол-во", "Ставка, руб/ед."),
+                                  ("block_z_pct", None, "Ставка, доля от СМР+G"), ("block_z_fixed", None, "Сумма, руб")]:
+            df = ss.get(store, {}).get(name)
+            if df is None:
+                continue
+            for _, r in df.iterrows():
+                v = _xl_num(r[vcol])
+                q = _xl_num(r[qcol]) if qcol else None
+                if v or q:
+                    data["items"].append([name, r["Код"], r["Статья затрат"], q, v])
+        idf = ss.get("block_infra", {}).get(name)
+        if idf is not None and "Сумма, руб" in idf.columns:
+            for _, r in idf.iterrows():
+                if _xl_num(r["Сумма, руб"]):
+                    data["infra"].append([name, r.get("Статья затрат", ""), _xl_num(r["Сумма, руб"])])
+    for key, label in TPL_INDIRECT_SECTIONS.items():
+        df = ss.get("indirect_items", {}).get(key)
+        if df is not None and "Сумма, руб" in df.columns:
+            for _, r in df.iterrows():
+                if _xl_num(r["Сумма, руб"]):
+                    data["indirect"].append([label, r.get("Наименование", ""), _xl_num(r["Сумма, руб"])])
+    return data
+
+
+TPL_SHEET_GUIDE = "Инструкция"
+TPL_SHEET_MP = "МП — коробка"
+TPL_SHEET_EP_PARAMS = "ЭП — параметры"
+TPL_SHEET_EP_RATES = "ЭП — ставки A–E"
+TPL_SHEET_GZ = "G и Z"
+TPL_SHEET_LISTS = "Списки"
+TPL_MIN_BLOCKS = 20        # строк/колонок под блоки в пустом шаблоне
+TPL_FIRST_BLOCK_COL = 5    # в матрицах блоки начинаются с колонки E
+TPL_INFRA_SUGGEST = [
+    "Благоустройство общественных пространств", "Плейхаб", "Парк / сквер", "Спортхаб", "Догхаб",
+    "Пешеходный бульвар", "Дороги и проезды общего пользования", "Инженерные сети общего пользования",
+]
+TPL_INDIRECT_SUGGEST = [
+    "Покупка земельного участка", "Аренда земельного участка", "Земля — очередь …",
+    "ТП / электроснабжение (магистральное)", "Водовод", "Канализация (КНС, коллектор)", "Теплосеть магистральная",
+    "Благоустройство МОП", "Школа", "Детский сад", "Маркетинг", "Управление проектом", "Прочее",
+]
+_COMMON_KINDS = ("name", "type", "main", "price", "park")
+_COMMON_TEP = {"Общая площадь квартир (с летними, с коэф.), м2", "Площадь коммерции, м2",
+               "Площадь кладовых в доме, м2", "Площадь участка блока, га"}
+
+
+def _tpl_common_cols():
+    return [(h, k, key) for h, k, key in TPL_BLOCK_COLS if k in _COMMON_KINDS or (k == "tep" and key in _COMMON_TEP)]
+
+
+def _tpl_ep_cols():
+    return [(h, k, key) for h, k, key in TPL_BLOCK_COLS if k == "stops" or (k == "tep" and key not in _COMMON_TEP)]
+
+
+def _tpl_gz_rows():
+    """Строки листа «G и Z»: (код, статья, что вводить, вид, поле)."""
+    rows = []
+    for c, n, u, r in ITEMS_G_AREA:
+        rows.append((c, n, "ставка, руб/га участка", "G_AREA", "rate"))
+    for c, n, u, q, r in ITEMS_G_LENGTH:
+        rows.append((c, n, f"кол-во, {u}", "G_LENGTH", "qty"))
+        rows.append((c, n, f"ставка, руб/{u.split()[0]}", "G_LENGTH", "rate"))
+    for c, n, r in ITEMS_Z_PCT:
+        rows.append((c, n, "доля от базы Z (8 % = 0,08)", "Z_PCT", "rate"))
+    for c, n, s in ITEMS_Z_FIXED:
+        rows.append((c, n, "сумма, руб", "Z_FIXED", "sum"))
+    return rows
+
+
+def build_template_bytes(data: dict = None) -> bytes:
+    """Шаблон загрузки: МП и ЭП на отдельных листах, коды статей преднастроены,
+    блоки подтягиваются формулами с листа «Блоки», выпадающие списки."""
+    from openpyxl.worksheet.datavalidation import DataValidation
+    from openpyxl.comments import Comment
+    data = data or {}
+    blocks = data.get("blocks") or []
+    n_bl = max(TPL_MIN_BLOCKS, len(blocks))
+    last_bl_row = n_bl + 1
+    thin = Side(style="thin", color="D9D9D9")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    input_fill = PatternFill("solid", fgColor="FFFFFF")
+    ro_fill = PatternFill("solid", fgColor="F2F2F2")
+    sec_fill = PatternFill("solid", fgColor="EEF7EC")
+    fnt = Font(name="Arial", size=10)
+
+    def grid(ws, r1, r2, c1, c2, fill=None, fmt=None):
+        for r in range(r1, r2 + 1):
+            for c in range(c1, c2 + 1):
+                cell = ws.cell(r, c)
+                cell.border = border
+                cell.font = fnt
+                if fill is not None:
+                    cell.fill = fill
+                if fmt:
+                    cell.number_format = fmt
+
+    def dv_list(ws, formula, rng, strict=True, prompt=None):
+        dv = DataValidation(type="list", formula1=formula, allow_blank=True,
+                            showErrorMessage=strict, showInputMessage=bool(prompt))
+        if prompt:
+            dv.promptTitle, dv.prompt = "Подсказка", prompt
+        if not strict:
+            dv.errorStyle = "information"
+        ws.add_data_validation(dv)
+        dv.add(rng)
+
+    wb = Workbook()
+    # --- Инструкция
+    wsg = wb.active
+    wsg.title = TPL_SHEET_GUIDE
+    guide = [
+        ("Шаблон загрузки финмодели", None),
+        ("1. «Проект»", "название, город, стадия (МП или ЭП — из списка), сценарий."),
+        ("2. «Блоки»", "строка на урбан-блок: название, тип (из списка), площади, м/м, участок, цены, ставки СМР паркинга. "
+                       "Названия блоков дальше подставляются на всех листах сами."),
+        ("3. «МП — коробка»", "стадия МП: ставка коробки, руб/м² NSA по каждому жилому блоку."),
+        ("4. «ЭП — параметры» и «ЭП — ставки A–E»", "стадия ЭП: параметры домов и ставки по 32 статьям A–E. Коды преднастроены, "
+                                                   "вводится только ставка в колонке блока."),
+        ("5. «G и Z»", "обе стадии: наружные работы и прочие затраты по кодам — ставка, кол-во, доля или сумма в колонке блока."),
+        ("6. «Инфраструктура»", "Z.50.10 по блокам: блок и статья — из списка (статью можно вписать свою), сумма."),
+        ("7. «Косвенные»", "затраты на весь участок: раздел — из списка, статья — из списка или своя, сумма."),
+        ("Загрузка", "в приложении: боковая панель → «Данные из Excel» → выбрать файл → «Загрузить данные»."),
+        ("Правила", "белые ячейки — ввод, серые — подставляются сами. Не вставляйте и не удаляйте строки на листе «Блоки» "
+                    "между блоками: колонки на других листах привязаны к порядку строк. Пустые ячейки = 0."),
+    ]
+    for i, (a, b) in enumerate(guide, start=1):
+        wsg.cell(i, 1, a).font = Font(name="Arial", bold=True, size=14 if i == 1 else 10,
+                                      color="41AA37" if i == 1 else "1F1F1F")
+        if b:
+            wsg.cell(i, 2, b).font = fnt
+            wsg.cell(i, 2).alignment = Alignment(wrap_text=True, vertical="top")
+    wsg.column_dimensions["A"].width = 34
+    wsg.column_dimensions["B"].width = 110
+
+    # --- Списки (служебный)
+    wsl = wb.create_sheet(TPL_SHEET_LISTS)
+    lists = {
+        "A": ["МП", "ЭП"], "B": list(SCENARIOS.keys()), "C": BLOCK_TYPES,
+        "D": list(TPL_INDIRECT_SECTIONS.values()), "E": TPL_INFRA_SUGGEST, "F": TPL_INDIRECT_SUGGEST,
+    }
+    for col, vals in lists.items():
+        for i, v in enumerate(vals, start=1):
+            wsl[f"{col}{i}"] = v
+    rng = {col: f"{TPL_SHEET_LISTS}!${col}$1:${col}${len(v)}" for col, v in lists.items()}
+    wsl.sheet_state = "hidden"
+
+    # --- Проект
+    ws = wb.create_sheet(TPL_SHEET_PROJECT)
+    ws.append(["Параметр", "Значение"])
+    _tpl_style_header(ws, 2)
+    proj = data.get("project") or {"Наименование проекта": "ЖК «Пример»", "Город": "",
+                                   "Стадия (МП/ЭП)": "МП", "Сценарий": "Базовый"}
+    for k in ["Наименование проекта", "Город", "Стадия (МП/ЭП)", "Сценарий"]:
+        ws.append([k, proj.get(k, "")])
+    grid(ws, 2, 5, 1, 1, ro_fill)
+    grid(ws, 2, 5, 2, 2, input_fill)
+    dv_list(ws, f"={rng['A']}", "B4")
+    dv_list(ws, f"={rng['B']}", "B5")
+    ws.column_dimensions["A"].width = 28
+    ws.column_dimensions["B"].width = 44
+
+    # --- Блоки (общие для МП и ЭП)
+    common = _tpl_common_cols()
+    wsb = wb.create_sheet(TPL_SHEET_BLOCKS)
+    wsb.append([h for h, _, _ in common])
+    _tpl_style_header(wsb, len(common))
+    for i in range(n_bl):
+        rec = blocks[i] if i < len(blocks) else {}
+        wsb.append([rec.get(h) for h, _, _ in common])
+    grid(wsb, 2, last_bl_row, 1, 2, input_fill)
+    grid(wsb, 2, last_bl_row, 3, len(common), input_fill, "#,##0.##")
+    dv_list(wsb, f"={rng['C']}", f"B2:B{last_bl_row}", prompt="Жилой блок или наземный/многоуровневый паркинг")
+    for i in range(1, len(common) + 1):
+        wsb.column_dimensions[get_column_letter(i)].width = 15
+    wsb.column_dimensions["A"].width = 28
+    wsb.column_dimensions["B"].width = 32
+    wsb.freeze_panes = "C2"
+    names_rng = f"{TPL_SHEET_BLOCKS}!$A$2:$A${last_bl_row}"
+
+    def name_formula(i):
+        return f'=IF({TPL_SHEET_BLOCKS}!A{i + 2}="","",{TPL_SHEET_BLOCKS}!A{i + 2})'
+
+    def type_formula(i):
+        return f'=IF({TPL_SHEET_BLOCKS}!A{i + 2}="","",{TPL_SHEET_BLOCKS}!B{i + 2})'
+
+    # --- МП — коробка
+    mp_hdr = next(h for h, k, _ in TPL_BLOCK_COLS if k == "mp")
+    wsm = wb.create_sheet(TPL_SHEET_MP)
+    wsm.append(["Блок", "Тип блока", mp_hdr])
+    _tpl_style_header(wsm, 3)
+    for i in range(n_bl):
+        rec = blocks[i] if i < len(blocks) else {}
+        wsm.append([name_formula(i), type_formula(i), rec.get(mp_hdr) or None])
+    grid(wsm, 2, last_bl_row, 1, 2, ro_fill)
+    grid(wsm, 2, last_bl_row, 3, 3, input_fill, "#,##0")
+    wsm.cell(1, 3).comment = Comment("Только для жилых блоков. Коробка паркинга — ставкой за м/м на листе «Блоки».", "Шаблон")
+    wsm.column_dimensions["A"].width = 28
+    wsm.column_dimensions["B"].width = 32
+    wsm.column_dimensions["C"].width = 22
+
+    # --- ЭП — параметры
+    epc = _tpl_ep_cols()
+    wse = wb.create_sheet(TPL_SHEET_EP_PARAMS)
+    wse.append(["Блок", "Тип блока"] + [h.replace("ЭП: ", "") for h, _, _ in epc])
+    _tpl_style_header(wse, 2 + len(epc))
+    for i in range(n_bl):
+        rec = blocks[i] if i < len(blocks) else {}
+        wse.append([name_formula(i), type_formula(i)] + [rec.get(h) or None for h, _, _ in epc])
+    grid(wse, 2, last_bl_row, 1, 2, ro_fill)
+    grid(wse, 2, last_bl_row, 3, 2 + len(epc), input_fill, "#,##0.##")
+    wse.column_dimensions["A"].width = 28
+    wse.column_dimensions["B"].width = 32
+    for i in range(3, 3 + len(epc)):
+        wse.column_dimensions[get_column_letter(i)].width = 14
+    wse.freeze_panes = "C2"
+
+    # --- матрицы: код × блок
+    items = data.get("items") or []
+    vals = {}  # (блок, код, поле) -> значение
+    for n, code, _lbl, q, v in items:
+        code = _norm_code(code)
+        kind = _CODE_KIND.get(code, (None,))[0]
+        if kind == "G_LENGTH":
+            if q:
+                vals[(n, code, "qty")] = q
+            if v:
+                vals[(n, code, "rate")] = v
+        elif kind:
+            vals[(n, code, "rate" if kind != "Z_FIXED" else "sum")] = v
+    bl_names = [b.get("Название блока") for b in blocks]
+
+    def matrix(ws, rows, fmt_of):
+        hdr = ["Код", "Статья", "Что вводить", "Группа / ед."]
+        ws.append(hdr + [None] * n_bl)
+        for j in range(n_bl):
+            ws.cell(1, TPL_FIRST_BLOCK_COL + j, name_formula(j))
+        _tpl_style_header(ws, TPL_FIRST_BLOCK_COL - 1 + n_bl)
+        prev_group = None
+        r = 2
+        for code, name, what, grp, field in rows:
+            ws.cell(r, 1, code)
+            ws.cell(r, 2, name)
+            ws.cell(r, 3, what)
+            ws.cell(r, 4, grp)
+            for j in range(n_bl):
+                bn = bl_names[j] if j < len(bl_names) else None
+                v = vals.get((bn, code, field)) if bn else None
+                if v:
+                    ws.cell(r, TPL_FIRST_BLOCK_COL + j, v)
+            grid(ws, r, r, 1, 4, sec_fill if grp != prev_group else ro_fill)
+            grid(ws, r, r, TPL_FIRST_BLOCK_COL, TPL_FIRST_BLOCK_COL - 1 + n_bl, input_fill, fmt_of(field, code))
+            prev_group = grp
+            r += 1
+        ws.column_dimensions["A"].width = 10
+        ws.column_dimensions["B"].width = 44
+        ws.column_dimensions["C"].width = 24
+        ws.column_dimensions["D"].width = 16
+        for j in range(n_bl):
+            ws.column_dimensions[get_column_letter(TPL_FIRST_BLOCK_COL + j)].width = 15
+        ws.freeze_panes = ws.cell(2, TPL_FIRST_BLOCK_COL)
+
+    wsr = wb.create_sheet(TPL_SHEET_EP_RATES)
+    matrix(wsr, [(c, n, f"ставка, {u}", f"{g} · {GROUP_LABELS[g]}", "rate") for c, n, g, u, b, r in ITEMS],
+           lambda f, c: "#,##0.##")
+    wsz = wb.create_sheet(TPL_SHEET_GZ)
+    gz_rows = [(c, n, what, {"G_AREA": "G · на площадь", "G_LENGTH": "G · сети", "Z_PCT": "Z · доля",
+                             "Z_FIXED": "Z · сумма"}[kind], field) for c, n, what, kind, field in _tpl_gz_rows()]
+    matrix(wsz, gz_rows, lambda f, c: "0.0%" if _CODE_KIND.get(c, ("",))[0] == "Z_PCT" else "#,##0.##")
+
+    # --- Инфраструктура
+    wsf = wb.create_sheet(TPL_SHEET_INFRA)
+    wsf.append(["Блок", "Статья", "Сумма, руб"])
+    _tpl_style_header(wsf, 3)
+    infra_rows = data.get("infra") or []
+    n_inf = max(60, len(infra_rows) + 20)
+    for r in infra_rows:
+        wsf.append(r)
+    grid(wsf, 2, n_inf + 1, 1, 2, input_fill)
+    grid(wsf, 2, n_inf + 1, 3, 3, input_fill, "#,##0")
+    dv_list(wsf, f"={names_rng}", f"A2:A{n_inf + 1}", prompt="Блок с листа «Блоки»")
+    dv_list(wsf, f"={rng['E']}", f"B2:B{n_inf + 1}", strict=False, prompt="Выберите из списка или впишите свою статью")
+    for col, w in zip("ABC", [28, 50, 18]):
+        wsf.column_dimensions[col].width = w
+
+    # --- Косвенные
+    wsk = wb.create_sheet(TPL_SHEET_INDIRECT)
+    wsk.append(["Раздел", "Статья", "Сумма, руб"])
+    _tpl_style_header(wsk, 3)
+    ind_rows = data.get("indirect") or []
+    n_ind = max(50, len(ind_rows) + 20)
+    for r in ind_rows:
+        wsk.append(r)
+    grid(wsk, 2, n_ind + 1, 1, 2, input_fill)
+    grid(wsk, 2, n_ind + 1, 3, 3, input_fill, "#,##0")
+    dv_list(wsk, f"={rng['D']}", f"A2:A{n_ind + 1}", prompt="Раздел пула косвенных расходов")
+    dv_list(wsk, f"={rng['F']}", f"B2:B{n_ind + 1}", strict=False, prompt="Выберите из списка или впишите свою статью")
+    for col, w in zip("ABC", [40, 50, 18]):
+        wsk.column_dimensions[col].width = w
+
+    # --- Справочник кодов
+    wsc = wb.create_sheet(TPL_SHEET_CODES)
+    wsc.append(["Код", "Статья", "Где вводить / что вводить"])
+    _tpl_style_header(wsc, 3)
+    for c, (kind, n, what) in _CODE_KIND.items():
+        where = TPL_SHEET_EP_RATES if kind == "ITEMS" else TPL_SHEET_GZ
+        wsc.append([c, n, f"«{where}»: {what}"])
+    for col, w in zip("ABC", [12, 60, 70]):
+        wsc.column_dimensions[col].width = w
+
+    wb._sheets = [wb[s] for s in [TPL_SHEET_GUIDE, TPL_SHEET_PROJECT, TPL_SHEET_BLOCKS, TPL_SHEET_MP,
+                                  TPL_SHEET_EP_PARAMS, TPL_SHEET_EP_RATES, TPL_SHEET_GZ, TPL_SHEET_INFRA,
+                                  TPL_SHEET_INDIRECT, TPL_SHEET_CODES, TPL_SHEET_LISTS]]
+    wb.active = 1
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def parse_template(file_bytes: bytes):
+    """Шаблон -> (новые значения session_state, предупреждения). Ошибку формата
+    возвращает строкой в предупреждениях и state=None."""
+    from openpyxl import load_workbook
+    warns = []
+    try:
+        wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    except Exception as e:
+        return None, [f"Файл не читается как Excel: {e}"]
+    if TPL_SHEET_BLOCKS not in wb.sheetnames:
+        return None, [f"Нет листа «{TPL_SHEET_BLOCKS}» — это не шаблон загрузки."]
+
+    proj = {}
+    if TPL_SHEET_PROJECT in wb.sheetnames:
+        for r in wb[TPL_SHEET_PROJECT].iter_rows(min_row=2, values_only=True):
+            if r and r[0]:
+                proj[str(r[0]).strip()] = r[1] if len(r) > 1 else None
+
+    wsb = wb[TPL_SHEET_BLOCKS]
+    hdr = [str(c.value).strip() if c.value is not None else "" for c in wsb[1]]
+    col_idx = {h: i for i, h in enumerate(hdr)}
+    missing = [h for h, _, _ in TPL_BLOCK_COLS[:2] if h not in col_idx]
+    if missing:
+        return None, [f"На листе «{TPL_SHEET_BLOCKS}» нет колонок: {', '.join(missing)}."]
+    blocks = []
+    seen = set()
+    for pos, r in enumerate(wsb.iter_rows(min_row=2, values_only=True)):
+        name = r[col_idx["Название блока"]] if col_idx["Название блока"] < len(r) else None
+        if name is None or str(name).strip() == "":
+            continue
+        name = str(name).strip()
+        if name in seen:
+            warns.append(f"Блок «{name}» повторяется — вторая строка пропущена.")
+            continue
+        seen.add(name)
+        t_raw = str(r[col_idx["Тип блока"]] or "").strip()
+        btype = TPL_TYPE_ALIASES.get(t_raw.lower(), t_raw if t_raw in BLOCK_TYPES else None)
+        if btype is None:
+            warns.append(f"Блок «{name}»: тип «{t_raw}» не распознан — принят «{TYPE_RESIDENTIAL}».")
+            btype = TYPE_RESIDENTIAL
+        rec = {"name": name, "type": btype, "pos": pos}
+        for h, kind, key in TPL_BLOCK_COLS[2:]:
+            rec[h] = _xl_num(r[col_idx[h]]) if h in col_idx and col_idx[h] < len(r) else 0.0
+        blocks.append(rec)
+    # Стадии на отдельных листах — строка листа = строка блока на «Блоки»
+    _mp_hdr0 = next(h for h, k, _ in TPL_BLOCK_COLS if k == "mp")
+    if TPL_SHEET_MP in wb.sheetnames:
+        _rows = list(wb[TPL_SHEET_MP].iter_rows(min_row=2, values_only=True))
+        for b in blocks:
+            if b["pos"] < len(_rows) and len(_rows[b["pos"]]) > 2 and _rows[b["pos"]][2] not in (None, ""):
+                b[_mp_hdr0] = _xl_num(_rows[b["pos"]][2])
+    if TPL_SHEET_EP_PARAMS in wb.sheetnames:
+        _wse = wb[TPL_SHEET_EP_PARAMS]
+        _eh = [str(c.value).strip() if c.value is not None else "" for c in _wse[1]]
+        _rows = list(_wse.iter_rows(min_row=2, values_only=True))
+        for h, k, key in _tpl_ep_cols():
+            short = h.replace("ЭП: ", "")
+            if short not in _eh:
+                continue
+            ci = _eh.index(short)
+            for b in blocks:
+                if b["pos"] < len(_rows) and ci < len(_rows[b["pos"]]) and _rows[b["pos"]][ci] not in (None, ""):
+                    b[h] = _xl_num(_rows[b["pos"]][ci])
+    if not blocks:
+        return None, [f"На листе «{TPL_SHEET_BLOCKS}» нет ни одного блока."]
+    names = [b["name"] for b in blocks]
+    btype_of = {b["name"]: b["type"] for b in blocks}
+
+    ss = {}
+    ss["project_name_input"] = str(proj.get("Наименование проекта") or "Проект из файла")
+    ss["project_city_input"] = str(proj.get("Город") or "")
+    stage = str(proj.get("Стадия (МП/ЭП)") or "МП").strip().upper()
+    ss["design_stage"] = STAGE_EP if stage.startswith("ЭП") else STAGE_MP
+    scen = str(proj.get("Сценарий") or "Базовый").strip()
+    ss["scenario_select"] = scen if scen in SCENARIOS else "Базовый"
+
+    # Блоки, ТЭП, лифты
+    main_rows, tep_store, stops = [], {}, {}
+    for b in blocks:
+        tep = {k: 0.0 for k in TEP_TO_MAIN_COL}
+        tep.update({c: 0.0 for c in EXTRA_EP_PARAM_COLS})
+        mrow = {c: 0.0 for c in MAIN_TABLE_NUMERIC_COLS}
+        for h, kind, key in TPL_BLOCK_COLS[2:]:
+            if kind == "tep":
+                tep[key] = b[h]
+            elif kind == "main":
+                mrow[key] = b[h]
+            elif kind == "stops":
+                stops[b["name"]] = b[h]
+        if b["type"] == TYPE_PARKING:
+            tep["Общая площадь квартир (с летними, с коэф.), м2"] = 0.0
+        else:
+            mrow["Наземный/Многоуровневый паркинг, м/м"] = 0.0
+        for tep_col, main_col in TEP_TO_MAIN_COL.items():
+            if main_col in mrow:
+                mrow[main_col] = tep[tep_col]
+        main_rows.append({"Название блока": b["name"], "Тип блока": b["type"], **mrow})
+        tep_store[b["name"]] = tep
+    ss["blocks_df"] = pd.DataFrame(main_rows)[MAIN_TABLE_COLS]
+    ss["tep_store"] = tep_store
+    ss["block_elevator_stops"] = {n: stops.get(n, 0.0) for n in names if btype_of[n] == TYPE_RESIDENTIAL}
+
+    def _cascade(store_key, keymap, applies, default_key_fn):
+        """Значения по блокам -> база (самое частое значение среди применимых) +
+        cascade-хранилище; в неприменимых ячейках — база."""
+        store = {n: {} for n in names}
+        prev = {}
+        for hdr_name, col in keymap.items():
+            vals = [b[hdr_name] for b in blocks if b["type"] in applies.get(col, set(BLOCK_TYPES))]
+            nz = [v for v in vals if v]
+            base = max(set(nz), key=nz.count) if nz else 0.0
+            ss[default_key_fn(col)] = float(base)
+            prev[col] = float(base)
+            for b in blocks:
+                ok = b["type"] in applies.get(col, set(BLOCK_TYPES))
+                store[b["name"]][col] = float(b[hdr_name]) if ok else float(base)
+        ss[f"_cascade_{store_key}"] = store
+        ss[f"_cascade_{store_key}_prev"] = prev
+
+    _cascade("prices", {h: k for h, kind, k in TPL_BLOCK_COLS if kind == "price"}, _PRICE_APPLIES,
+             lambda c: f"_price_default_{c}")
+    _cascade("smr_parking", {h: k for h, kind, k in TPL_BLOCK_COLS if kind == "park"}, _PARK_APPLIES,
+             lambda c: f"_smr_parking_default_{c}")
+    _mp_hdr = next(h for h, kind, _ in TPL_BLOCK_COLS if kind == "mp")
+    _res_blocks = [b for b in blocks if b["type"] == TYPE_RESIDENTIAL]
+    _nz = [b[_mp_hdr] for b in _res_blocks if b[_mp_hdr]]
+    _mp_base = max(set(_nz), key=_nz.count) if _nz else 0.0
+    ss["_mp_korobka_default"] = float(_mp_base)
+    ss["_cascade_mp_korobka"] = {b["name"]: {"Ставка, руб/м2 NSA": float(b[_mp_hdr])} for b in _res_blocks}
+    ss["_cascade_mp_korobka_prev"] = {"Ставка, руб/м2 NSA": float(_mp_base)}
+    ss["block_mp_rate"] = {b["name"]: float(b[_mp_hdr]) for b in _res_blocks}
+
+    # Статьи СМР
+    rates = {n: DEFAULT_RATES_DF.copy() for n in names if btype_of[n] == TYPE_RESIDENTIAL}
+    g_area = {n: DEFAULT_G_AREA_DF.copy() for n in names}
+    g_len = {n: DEFAULT_G_LENGTH_DF.copy() for n in names}
+    z_pct = {n: DEFAULT_Z_PCT_DF.copy() for n in names}
+    z_fix = {n: DEFAULT_Z_FIXED_DF.copy() for n in names}
+    raw_items = []  # (источник, блок, код, кол-во, значение)
+    if TPL_SHEET_ITEMS in wb.sheetnames:  # прежний формат: длинный список
+        for i, r in enumerate(wb[TPL_SHEET_ITEMS].iter_rows(min_row=2, values_only=True), start=2):
+            if not r or r[0] is None or r[1] is None:
+                continue
+            raw_items.append((f"«{TPL_SHEET_ITEMS}», строка {i}", str(r[0]).strip(), r[1],
+                              _xl_num(r[3]) if len(r) > 3 else 0.0, _xl_num(r[4]) if len(r) > 4 else 0.0))
+    pos_name = {b["pos"]: b["name"] for b in blocks}
+    for sheet in (TPL_SHEET_EP_RATES, TPL_SHEET_GZ):
+        if sheet not in wb.sheetnames:
+            continue
+        acc = {}  # (блок, код) -> [кол-во, значение]
+        for i, r in enumerate(wb[sheet].iter_rows(min_row=2, values_only=True), start=2):
+            if not r or r[0] is None:
+                continue
+            code = _norm_code(r[0])
+            is_qty = "кол-во" in str(r[2] or "").lower()
+            for j in range(TPL_FIRST_BLOCK_COL - 1, len(r)):
+                v = r[j]
+                if v in (None, "") or not _xl_num(v):
+                    continue
+                n = pos_name.get(j - (TPL_FIRST_BLOCK_COL - 1))
+                if n is None:
+                    warns.append(f"«{sheet}», {get_column_letter(j + 1)}{i}: значение в колонке без блока — пропущено.")
+                    continue
+                a = acc.setdefault((n, code), [0.0, 0.0, i])
+                if is_qty:
+                    a[0] = _xl_num(v)
+                else:
+                    a[1] = _xl_num(v)
+        for (n, code), (q, v, i) in acc.items():
+            raw_items.append((f"«{sheet}», строка {i}", n, code, q, v))
+    for src_label, n, code_raw, qty, val in raw_items:
+        if True:
+            code = _norm_code(code_raw)
+            r = (n, code_raw)
+            i = src_label
+            if n not in btype_of:
+                warns.append(f"{i}: блока «{n}» нет на листе «Блоки» — пропущено.")
+                continue
+            kind = _CODE_KIND.get(code, (None,))[0]
+            if kind is None:
+                warns.append(f"{i}: код «{r[1]}» не найден в справочнике — пропущено.")
+                continue
+            if kind == "ITEMS":
+                if btype_of[n] != TYPE_RESIDENTIAL:
+                    warns.append(f"{i}: статьи A–E — только для жилых блоков, «{n}» — паркинг.")
+                    continue
+                df = rates[n]
+                df.loc[df["Код"] == code, "Ставка, руб/ед."] = df.loc[df["Код"] == code, "Ставка, руб/ед."] + val
+            elif kind == "G_AREA":
+                df = g_area[n]
+                df.loc[df["Код"] == code, "Ставка, руб/ед."] = df.loc[df["Код"] == code, "Ставка, руб/ед."] + val
+            elif kind == "G_LENGTH":
+                df = g_len[n]
+                m = df["Код"] == code
+                if float(df.loc[m, "Кол-во"].iloc[0]) and qty and float(df.loc[m, "Кол-во"].iloc[0]) != qty:
+                    warns.append(f"{i}: код {code} у «{n}» повторяется с другим кол-вом — взята последняя строка.")
+                df.loc[m, "Кол-во"] = qty if qty else 1.0
+                df.loc[m, "Ставка, руб/ед."] = val
+            elif kind == "Z_PCT":
+                df = z_pct[n]
+                df.loc[df["Код"] == code, "Ставка, доля от СМР+G"] = val
+            elif kind == "Z_FIXED":
+                df = z_fix[n]
+                df.loc[df["Код"] == code, "Сумма, руб"] = df.loc[df["Код"] == code, "Сумма, руб"] + val
+    ss["block_rates"], ss["block_g_area"], ss["block_g_length"] = rates, g_area, g_len
+    ss["block_z_pct"], ss["block_z_fixed"] = z_pct, z_fix
+
+    infra = {n: EMPTY_INFRA_DF.copy() for n in names}
+    if TPL_SHEET_INFRA in wb.sheetnames:
+        for i, r in enumerate(wb[TPL_SHEET_INFRA].iter_rows(min_row=2, values_only=True), start=2):
+            if not r or r[0] is None:
+                continue
+            n = str(r[0]).strip()
+            if not (len(r) > 2 and _xl_num(r[2])) and not (len(r) > 1 and r[1]):
+                continue
+            if n not in infra:
+                warns.append(f"«{TPL_SHEET_INFRA}», строка {i}: блока «{n}» нет — пропущено.")
+                continue
+            infra[n] = pd.concat([infra[n], pd.DataFrame([{"Статья затрат": r[1] or "", "Сумма, руб": _xl_num(r[2])}])],
+                                 ignore_index=True)
+    ss["block_infra"] = infra
+
+    ind = {k: [] for k in TPL_INDIRECT_SECTIONS}
+    label_to_key = {v.lower(): k for k, v in TPL_INDIRECT_SECTIONS.items()}
+    label_to_key.update({"магистральные сети": "infra", "благоустройство моп": "landscape",
+                         "социальные объекты": "social", "прочие soft costs": "soft", "soft costs": "soft"})
+    if TPL_SHEET_INDIRECT in wb.sheetnames:
+        for i, r in enumerate(wb[TPL_SHEET_INDIRECT].iter_rows(min_row=2, values_only=True), start=2):
+            if not r or r[0] is None:
+                continue
+            if not (len(r) > 2 and _xl_num(r[2])) and not (len(r) > 1 and r[1]):
+                continue
+            key = label_to_key.get(str(r[0]).strip().lower())
+            if key is None:
+                warns.append(f"«{TPL_SHEET_INDIRECT}», строка {i}: раздел «{r[0]}» не распознан — записан в «Прочие Soft Costs».")
+                key = "soft"
+            ind[key].append({"Наименование": r[1] or TPL_INDIRECT_SECTIONS[key], "Сумма, руб": _xl_num(r[2])})
+    for key, label in TPL_INDIRECT_SECTIONS.items():
+        rows = ind[key][:MAX_INDIRECT_ITEMS]
+        if len(ind[key]) > MAX_INDIRECT_ITEMS:
+            warns.append(f"«{label}»: больше {MAX_INDIRECT_ITEMS} статей — лишние свернуты в последнюю строку.")
+            extra = sum(x["Сумма, руб"] for x in ind[key][MAX_INDIRECT_ITEMS - 1:])
+            rows = ind[key][:MAX_INDIRECT_ITEMS - 1] + [{"Наименование": "Прочее (свернуто при загрузке)", "Сумма, руб": extra}]
+        ind[key] = pd.DataFrame(rows or [{"Наименование": label, "Сумма, руб": 0.0}])
+    ss["indirect_items"] = ind
+    return ss, warns
+
+
+def apply_imported_state(new_state: dict) -> None:
+    """Заменяет ввод на экране загруженным проектом (сохранения на диске не трогает)."""
+    keep_user = st.session_state.get("user_name_input", "")
+    st.session_state.clear()
+    st.session_state["user_name_input"] = keep_user
+    st.session_state["_bootstrapped"] = True
+    st.session_state["_autosave_loaded"] = False
+    for k, v in new_state.items():
+        st.session_state[k] = v
+
+
+def _cb_import_template():
+    f = st.session_state.get("_tpl_upload")
+    if f is None:
+        st.session_state["_tpl_msgs"] = ["Сначала выберите файл."]
+        return
+    new_state, warns = parse_template(f.getvalue())
+    if new_state is None:
+        st.session_state["_tpl_msgs"] = warns
+        return
+    apply_imported_state(new_state)
+    st.session_state["_tpl_msgs"] = [f"Загружено: «{new_state['project_name_input']}», "
+                                     f"блоков — {len(new_state['blocks_df'])}."] + warns
+
+
+EMPTY_TEMPLATE_BYTES = None  # собирается при первом обращении
+
+
+# ======================================================================
 # 4. БОКОВАЯ ПАНЕЛЬ — ПОЛЬЗОВАТЕЛЬ, ПРОЕКТЫ, ХРАНИЛИЩЕ
 # ======================================================================
 with st.sidebar:
@@ -1511,6 +2273,45 @@ with st.sidebar:
                 st.session_state.pop("_project_picker", None)
                 st.session_state.pop("_last_saved_sig", None)
                 st.rerun()
+
+    with st.expander("Данные из Excel", icon=":material/table_view:"):
+        st.caption(
+            "Один файл заполняет все вкладки. Загрузка заменяет данные на экране; "
+            "сохранённые проекты не трогает. Проект сохранится под названием из файла."
+        )
+        if EMPTY_TEMPLATE_BYTES is None:
+            EMPTY_TEMPLATE_BYTES = build_template_bytes(None)
+        st.download_button(
+            "Пустой шаблон", data=EMPTY_TEMPLATE_BYTES, file_name="Шаблон загрузки финмодели.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch",
+            icon=":material/download:",
+        )
+        try:
+            _export_bytes = build_template_bytes(collect_template_data())
+        except Exception:
+            _export_bytes = None
+        if _export_bytes:
+            st.download_button(
+                "Текущий проект в шаблон", data=_export_bytes,
+                file_name=f"{_slugify(st.session_state.get('project_name_input', 'проект'))} — шаблон.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch",
+                icon=":material/download:",
+            )
+        st.file_uploader("Файл шаблона (.xlsx)", type=["xlsx"], key="_tpl_upload")
+        st.button(
+            "Загрузить данные", on_click=_cb_import_template, width="stretch",
+            disabled=st.session_state.get("_tpl_upload") is None,
+        )
+    _tpl_msgs = st.session_state.pop("_tpl_msgs", None)
+    if _tpl_msgs:
+        if _tpl_msgs[0].startswith("Загружено"):
+            st.success(_tpl_msgs[0])
+        else:
+            st.error(_tpl_msgs[0])
+        for _w in _tpl_msgs[1:12]:
+            st.warning(_w)
+        if len(_tpl_msgs) > 12:
+            st.warning(f"… и ещё {len(_tpl_msgs) - 12} предупреждений.")
 
     if not st.session_state["user_name_input"].strip():
         st.caption("⚠️ Введите имя — иначе данные не будут сохраняться.")
@@ -1770,6 +2571,11 @@ for _store_name, _default_df in GZ_STORES:
         if _name not in _d:
             _p = _prev_same.get(_t)
             _d[_name] = _d[_p].copy() if _p is not None else _default_df.copy()
+        else:
+            # статьи, добавленные в каталог позже (старые сохранения) — с нулём
+            _miss = _default_df[~_default_df["Код"].isin(_d[_name]["Код"])]
+            if len(_miss):
+                _d[_name] = pd.concat([_d[_name], _miss], ignore_index=True)
         _prev_same[_t] = _name
     st.session_state[_store_name] = _d
 
