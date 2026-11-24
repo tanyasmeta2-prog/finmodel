@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+talan_model_saves*/
+talan_model_last_opened*.json
+.streamlit/secrets.toml
