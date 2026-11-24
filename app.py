@@ -334,7 +334,7 @@ _talan_logo_bytes = base64.b64decode(TALAN_LOGO_PNG_B64)
 _talan_logo_icon = PILImage.open(io.BytesIO(_talan_logo_bytes))
 
 st.set_page_config(
-    page_title="Финмодель девелоперского проекта",
+    page_title="Финмодель · Версия 2",
     page_icon=_talan_logo_icon,
     layout="wide",
 )
@@ -853,10 +853,10 @@ def generate_default_table() -> pd.DataFrame:
 #   • Локальная папка рядом с app.py — если токена нет (запуск на своем ПК).
 #     На Streamlit Cloud локальный диск временный — данные теряются при
 #     перезапуске, поэтому там нужен Яндекс Диск.
-SAVES_DIR = Path(__file__).resolve().parent / "talan_model_saves"
-POINTER_PATH = Path(__file__).resolve().parent / "talan_model_last_opened.json"
+SAVES_DIR = Path(__file__).resolve().parent / "talan_model_saves_v2"
+POINTER_PATH = Path(__file__).resolve().parent / "talan_model_last_opened_v2.json"
 YA_API = "https://cloud-api.yandex.net/v1/disk/resources"
-YA_FOLDER = "app:/projects"
+YA_FOLDER = "app:/projects_v2"
 YA_TIMEOUT = 20  # сек на один HTTP-запрос
 YA_LIST_TTL = 20  # сек — кэш списка проектов в сессии
 
@@ -2341,6 +2341,7 @@ with st.sidebar:
 # ======================================================================
 # 5. ШАПКА (на всех вкладках): проект, город, стадия, сценарий, Excel + KPI
 # ======================================================================
+st.caption("Версия 2 · рабочая копия конфигуратора")
 h1, h2, h3, h4, h5 = st.columns([3, 1.3, 1.1, 1.4, 1.5], vertical_alignment="bottom")
 with h1:
     project_name = st.text_input("Проект", key="project_name_input")
