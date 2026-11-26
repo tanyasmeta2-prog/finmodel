@@ -127,13 +127,13 @@ def stage_workbook(wb, ws, ss, items, blocks, res_names, mp, helper, first_row, 
     inp.append(['Блок'] + extra + ['ИТП включены (1/0)'])
     name_row = {}
     for i, name in enumerate(blocks['Название блока']):
-        inp.append([name] + [number(ss.tep_store.get(name, {}).get(k)) for k in extra] + [0])
+        inp.append([name] + [number(ss["tep_store"].get(name, {}).get(k)) for k in extra] + [0])
         name_row[name] = i+2
     style_input_sheet(inp)
     geom_ws = wb.create_sheet('Геометрия МП')
     geom_ws.append(['Блок'] + SECTION_COLS + ['Застройка, м2','Подземная часть, м2','Надземная площадь, м2','Фасад, м2','Секции, шт'])
     for name in res_names:
-        for row in ss.mp_sections[name].to_dict('records'):
+        for row in ss["mp_sections"][name].to_dict('records'):
             r = geom_ws.max_row+1
             geom_ws.append([name]+[row.get(c) for c in SECTION_COLS])
             for c, formula in enumerate([f'=C{r}*D{r}',f'=I{r}*(1-H{r})',f'=I{r}*E{r}',f'=MAX(0,C{r}*F{r}*E{r}*3-G{r})',f'=C{r}*(1-H{r})'],start=9):
@@ -144,7 +144,7 @@ def stage_workbook(wb, ws, ss, items, blocks, res_names, mp, helper, first_row, 
     det = wb.create_sheet('Детализация ЭП')
     det.append(['Блок','Код','Категория','Тип / материал / размеры','Ед.','Объем',RATE,'Сумма, руб','Аналог','Дата цен','Состав работ / комментарий'])
     for name in res_names:
-        for row in ss.ep_details[name].to_dict('records'):
+        for row in ss["ep_details"][name].to_dict('records'):
             category=row.get('Категория')
             if category not in DETAIL_SPEC: continue
             code,unit=DETAIL_SPEC[category]
@@ -199,7 +199,7 @@ def stage_workbook(wb, ws, ss, items, blocks, res_names, mp, helper, first_row, 
                 elif basis=='VOL_TOTAL':expr=f"{h}{colmap['Объем здания ниже 0, м3']}{hr}+{h}{colmap['Объем здания выше 0, м3']}{hr}"
                 elif basis=='ELEVATOR_STOPS':
                     # explicit input in the quantity table
-                    expr=None;ws.cell(r,j,number(ss.block_elevator_stops.get(name))).fill=BLUE
+                    expr=None;ws.cell(r,j,number(ss["block_elevator_stops"].get(name))).fill=BLUE
                 else:
                     mapping={'AREA_FACADE':'Площадь фасада, м2','AREA_FOOTPRINT':'Площадь застройки, м2','VOL_BELOW':'Объем здания ниже 0, м3','VOL_ABOVE':'Объем здания выше 0, м3','AREA_GLAZING_WINDOWS':'Площадь остекления окон, м2','AREA_GLAZING_BALCONY':'Площадь остекления лоджий, м2','APT_COUNT':'Кол-во квартир, шт','ENTRANCE_COUNT':'Кол-во подъездов, шт'}
                     expr=f"{h}{colmap[mapping[basis]]}{hr}"
@@ -219,7 +219,7 @@ def stage_workbook(wb, ws, ss, items, blocks, res_names, mp, helper, first_row, 
                 if code in DETAIL_CODES:
                     last=max(2,det.max_row)
                     formula=f'=SUMIFS(\'Детализация ЭП\'!$H$2:$H${last},\'Детализация ЭП\'!$A$2:$A${last},A{r},\'Детализация ЭП\'!$B$2:$B${last},{get_column_letter(j)}${calc_header})'
-            if code == 'B.20.10' and name in res_names and ss.facade_modes.get(name)=='Детальный':
+            if code == 'B.20.10' and name in res_names and ss["facade_modes"].get(name)=='Детальный':
                 last=max(2,det.max_row)
                 formula=f'=SUMIFS(\'Детализация ЭП\'!$H$2:$H${last},\'Детализация ЭП\'!$A$2:$A${last},A{r})'
             ws.cell(r,j,formula).fill=GRAY
@@ -232,4 +232,4 @@ def stage_workbook(wb, ws, ss, items, blocks, res_names, mp, helper, first_row, 
 
 
 # Current UI and calculation adapter agreed in the visual review.
-from review_v3 import prepare, legend, render_geometry, render_details, quantities, render_rates, editor, readonly, render_ep_volumes, add_review_report, format_number
+from review_v3 import reset_editors, prepare, legend, render_geometry, render_details, quantities, render_rates, editor, readonly, render_ep_volumes, add_review_report, format_number
