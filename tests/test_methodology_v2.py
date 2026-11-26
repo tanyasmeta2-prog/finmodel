@@ -71,6 +71,7 @@ st.session_state['_capture'] = dict(excel=excel_bytes, template=build_template_b
 _parsed,_warns = parse_template(st.session_state['_capture']['template'])
 st.session_state['_roundtrip'] = _parsed
 st.session_state['_roundtrip_warnings'] = _warns
+st.session_state['_v3_empty_input'] = empty_sparse_template(('УБ 1',))
 '''
 
 
