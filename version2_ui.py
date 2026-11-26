@@ -10,7 +10,7 @@ from methodology_v2 import *
 
 REVISION = 3
 SAVE_TABLES = ['block_mp_rates', 'mp_sections', 'ep_details', 'legacy_rates']
-SAVE_PLAIN = ['methodology_revision', 'thermal_kind', 'facade_modes', 'legacy_warnings']
+SAVE_PLAIN = ['methodology_revision', 'thermal_kind', 'facade_modes', 'block_ids', 'legacy_warnings']
 DETAIL_CODES = {v[0] for v in DETAIL_SPEC.values()}
 YELLOW = PatternFill('solid', fgColor='FFF2CC')
 BLUE = PatternFill('solid', fgColor='DDEBF7')
@@ -62,7 +62,7 @@ def add_template_sheets(wb, snapshot):
     ws = wb.create_sheet('Настройки методики V2')
     ws.append(['Параметр', 'Блок', 'Значение'])
     ws.append(['Ревизия', '', REVISION])
-    for key in ['thermal_kind','facade_modes']:
+    for key in ['thermal_kind','facade_modes','block_ids']:
         for name,value in (snapshot.get(key) or {}).items():
             ws.append([key,name,value])
     style_input_sheet(ws, seo=True)
@@ -93,7 +93,7 @@ def restore_template(wb, ss, warns):
     if 'Настройки методики V2' in wb:
         ss['methodology_revision'] = REVISION
         for row in wb['Настройки методики V2'].iter_rows(min_row=2, values_only=True):
-            if row[0] in ['thermal_kind','facade_modes'] and row[1] in names:
+            if row[0] in ['thermal_kind','facade_modes','block_ids'] and row[1] in names:
                 ss.setdefault(row[0],{})[row[1]]=row[2]
     if 'ЭП — источники ставок' in wb:
         for name, code, applies, analog, date, comment in wb['ЭП — источники ставок'].iter_rows(min_row=2, values_only=True):
@@ -219,7 +219,7 @@ def stage_workbook(wb, ws, ss, items, blocks, res_names, mp, helper, first_row, 
                 if code in DETAIL_CODES:
                     last=max(2,det.max_row)
                     formula=f'=SUMIFS(\'Детализация ЭП\'!$H$2:$H${last},\'Детализация ЭП\'!$A$2:$A${last},A{r},\'Детализация ЭП\'!$B$2:$B${last},{get_column_letter(j)}${calc_header})'
-            if code == 'B.20.10' and name in res_names and ss.facade_modes.get(name)=='Детальный' and len(ss.ep_details[name]):
+            if code == 'B.20.10' and name in res_names and ss.facade_modes.get(name)=='Детальный':
                 last=max(2,det.max_row)
                 formula=f'=SUMIFS(\'Детализация ЭП\'!$H$2:$H${last},\'Детализация ЭП\'!$A$2:$A${last},A{r})'
             ws.cell(r,j,formula).fill=GRAY
