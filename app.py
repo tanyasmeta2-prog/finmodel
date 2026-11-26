@@ -35,6 +35,7 @@ import json
 import re
 import threading
 from datetime import datetime
+from importlib import reload
 from io import BytesIO
 from pathlib import Path
 
@@ -57,6 +58,20 @@ from openpyxl.chart.shapes import GraphicalProperties
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import column_index_from_string, get_column_letter
+
+@st.cache_resource
+def refresh_ui_after_deploy():
+    import review_v3
+
+    reload(review_v3)
+    reload(ui_v2)
+
+
+# A Streamlit Cloud source update can rerun this script in the existing Python process.
+# Refresh the two UI modules when that process still holds the previous interface.
+if not hasattr(ui_v2, "format_number"):
+    refresh_ui_after_deploy()
+
 
 # ======================================================================
 # 0. ЦВЕТОВАЯ ПАЛИТРА (фиксированный порядок слотов — единая для веб- и
