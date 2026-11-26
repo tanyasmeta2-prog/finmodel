@@ -809,7 +809,7 @@ SMR_PARKING_RATE_COLS = [
 # 3. КОЛОНКИ ЕДИНОЙ ТАБЛИЦЫ ТЭП И ТЕСТОВЫЕ ДАННЫЕ
 # ======================================================================
 NUMERIC_COLS = [
-    "S квартир, м2", "S коммерции 1 эт., м2", "S кладовых, м2",
+    "S квартир, м2", "S коммерции 1 эт., м2", "S кладовых, м2", "Площадь участка блока, га",
     "Подземный паркинг, м/м", "Наземный/Многоуровневый паркинг, м/м",
     "Цена жилья, руб/м2", "Цена коммерции, руб/м2", "Цена кладовых, руб/м2",
     "Цена подземного м/м, руб", "Цена наземного м/м, руб",
@@ -824,7 +824,7 @@ ALL_COLS = ["Название блока", "Тип блока"] + NUMERIC_COLS
 # параметры ЭП (PARAM_COLS) вводятся на Вкладках 2/3 и хранятся отдельно
 # (cascade-таблицы / tep_store), а не как колонки этой таблицы.
 MAIN_TABLE_NUMERIC_COLS = [
-    "S квартир, м2", "S коммерции 1 эт., м2", "S кладовых, м2",
+    "S квартир, м2", "S коммерции 1 эт., м2", "S кладовых, м2", "Площадь участка блока, га",
     "Подземный паркинг, м/м", "Наземный/Многоуровневый паркинг, м/м",
 ]
 MAIN_TABLE_COLS = ["Название блока", "Тип блока"] + MAIN_TABLE_NUMERIC_COLS
@@ -1354,7 +1354,7 @@ def base_row_table(store_key: str, cols: list, default_keys: dict, block_names: 
     for c in cols:
         cfg[c] = st.column_config.NumberColumn(labels[c], min_value=0, format=formats.get(c, "localized"))
     ver = st.session_state.get(f"_ver_{editor_key}", 0)
-    ed = st.data_editor(
+    ed = ui_v2.editor(st,
         df, key=f"{editor_key}_{ver}", hide_index=True, num_rows="fixed", width="stretch",
         column_order=["Блок"] + cols + [RESET_COL, CHANGED_COL], column_config=cfg,
     )
@@ -1399,7 +1399,7 @@ def transposed_editor(params: list, names: list, get, set_, key: str, allowed) -
     for n in names:
         cfg[n] = st.column_config.NumberColumn(n, min_value=0, format="localized")
     ver = st.session_state.get(f"_ver_{key}", 0)
-    ed = st.data_editor(
+    ed = ui_v2.editor(st,
         df, key=f"{key}_{ver}_{abs(hash(tuple(names)))}", hide_index=True, num_rows="fixed",
         width="stretch", column_config=cfg,
     )
@@ -1428,7 +1428,7 @@ def render_indirect_category(state_key: str, label: str, default_amount: float) 
         )
     with st.container(border=True):
         hdr = st.empty()
-        edited = st.data_editor(
+        edited = ui_v2.editor(st,
             st.session_state.indirect_items[state_key],
             width="stretch",
             num_rows="dynamic",
@@ -1740,7 +1740,7 @@ def build_template_bytes(data: dict = None) -> bytes:
         ("6. «Инфраструктура»", "Z.50.10 по блокам: блок и статья — из списка (статью можно вписать свою), сумма."),
         ("7. «Косвенные»", "затраты на весь участок: раздел — из списка, статья — из списка или своя, сумма."),
         ("Загрузка", "в приложении: боковая панель → «Данные из Excel» → выбрать файл → «Загрузить данные»."),
-        ("Правила", "жёлтые ячейки — СЭО, голубые — проектные объёмы, серые — авторасчёт. Старые листы: белые ячейки — ввод. Не вставляйте и не удаляйте строки на листе «Блоки» "
+        ("Правила", "✎ — ручной ввод, 🔒 — только просмотр. Таблицы с ручным вводом — светло-жёлтые, без ручного ввода — серые. Не вставляйте и не удаляйте строки на листе «Блоки» "
                     "между блоками: колонки на других листах привязаны к порядку строк. Пустые ячейки = 0."),
     ]
     for i, (a, b) in enumerate(guide, start=1):
@@ -2352,7 +2352,7 @@ with st.sidebar:
 # ======================================================================
 # 5. ШАПКА (на всех вкладках): проект, город, стадия, сценарий, Excel + KPI
 # ======================================================================
-st.caption("Версия 2 · методика МП / ЭП · A–E")
+st.caption("Версия 2 · обновление 26.11.2026 · МП / ЭП · A–E")
 h1, h2, h3, h4, h5 = st.columns([3, 1.3, 1.1, 1.4, 1.5], vertical_alignment="bottom")
 with h1:
     project_name = st.text_input("Проект", key="project_name_input")
@@ -2411,19 +2411,22 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(
 # остальные вкладки синхронизируются по «Название блока».
 # ------------------------------------------------------------------
 NAZEMNY_PARKING_COL = "Наземный/Многоуровневый паркинг, м/м"
-LOCKED_S_COLS = ["S квартир, м2", "S коммерции 1 эт., м2", "S кладовых, м2"]
+LOCKED_S_COLS = []
 with tab1:
     st.subheader(
         "Урбан-блоки",
         help=(
             "Блоки добавляются строкой «+» внизу таблицы, удаляются — выделить строку и корзина. "
-            "Площади квартир, коммерции и кладовых (🔒) вводятся в «3. СМР → Данные ЭП». "
+            "Площади квартир, коммерции, кладовых и участка вводятся здесь. "
             "Наземные м/м — только у блока типа «Наземный/Многоуровневый паркинг»; в паркинге "
             "доступны также коммерция и кладовые — они входят в NSA и получают долю косвенных. "
             "Названия блоков должны быть уникальны."
         ),
     )
     _view = st.session_state.blocks_df.copy()
+    if 'Площадь участка блока, га' not in _view:
+        _view['Площадь участка блока, га'] = [_num(st.session_state.tep_store.get(n,{}).get('Площадь участка блока, га')) for n in _view['Название блока']]
+
     for col in MAIN_TABLE_NUMERIC_COLS:
         if col not in _view.columns:
             _view[col] = 0.0
@@ -2453,9 +2456,10 @@ with tab1:
                 help="Только для блока типа «Наземный/Многоуровневый паркинг». В жилом блоке обнуляется.",
             )
         else:
-            column_config[col] = st.column_config.NumberColumn("Подземный, м/м", min_value=0, format="localized")
+            label = {"S квартир, м2":"Квартиры, м²", "S коммерции 1 эт., м2":"Коммерция, м²", "S кладовых, м2":"Кладовые, м²", "Площадь участка блока, га":"Участок блока, га"}.get(col,"Подземный, м/м")
+            column_config[col] = st.column_config.NumberColumn(label, min_value=0, format="localized")
 
-    edited = st.data_editor(
+    edited = ui_v2.editor(st,
         _view,
         num_rows="dynamic",
         width="stretch",
@@ -2490,7 +2494,7 @@ with tab1:
     is_res = (blocks["Тип блока"] == TYPE_RESIDENTIAL)
     is_park = (blocks["Тип блока"] == TYPE_PARKING)
     blocks.loc[is_res, NAZEMNY_PARKING_COL] = 0.0
-    st.caption("🔒 — вводится в «3. СМР → Данные ЭП». NSA — расчет, не редактируется.")
+    st.caption("✎ — редактируется. 🔒 — только просмотр. Площади передаются в СМР автоматически.")
 
 all_block_names = list(blocks["Название блока"])
 res_block_names = list(blocks.loc[is_res, "Название блока"])
@@ -2508,6 +2512,13 @@ for _name in all_block_names:
     else:
         for _tep_col, _tep_default in _tep_defaults.items():
             st.session_state.tep_store[_name].setdefault(_tep_col, _tep_default)
+
+# Shared areas have one input source: Blocks. Preserve imported TEP keys for templates.
+for _i, _name in enumerate(all_block_names):
+    for _tep_key, _main_key in TEP_TO_MAIN_COL.items():
+        if _main_key not in MAIN_TABLE_NUMERIC_COLS: continue
+        st.session_state.tep_store[_name][_tep_key] = float(blocks.iloc[_i][_main_key])
+    st.session_state.tep_store[_name]['Площадь участка блока, га'] = float(blocks.iloc[_i]['Площадь участка блока, га'])
 
 # ------------------------------------------------------------------
 # ВКЛАДКА 2: цены продаж — строка «База» + блоки
@@ -2620,28 +2631,22 @@ def _tep_set(n, k, v):
 
 
 with tab3:
-    sub_ep, sub_box, sub_park, sub_gz = st.tabs(["Данные МП / ЭП", "Коробка A–E", "Паркинг", "G и Z"])
+    sub_ep, sub_box, sub_park, sub_gz = st.tabs(["Объёмы", "Коробка A–E", "Паркинг", "G и Z"])
 
 with sub_ep:
     ui_v2.legend(st)
     if all_block_names:
         st.markdown("**Площади — нужны на МП и ЭП**")
-        transposed_editor(
-            AREA_PARAMS, all_block_names, _tep_get, _tep_set, "ep_areas_editor",
-            allowed=lambda n, k: block_type_of[n] == TYPE_RESIDENTIAL or k in PARKING_TEP_KEYS,
-        )
+        ui_v2.readonly(st, pd.DataFrame([{"Параметр":label,"Ед.":unit,**{n:_tep_get(n,k) for n in all_block_names}} for k,label,unit in AREA_PARAMS]), hide_index=True, width="stretch")
         if res_block_names and not is_mp_stage:
             st.markdown("**Только ЭП — база статей A–E**")
-            transposed_editor(
-                EP_ONLY_PARAMS + method_v2.EXTRA_PARAMS, res_block_names, _tep_get, _tep_set, "ep_only_editor",
-                allowed=lambda n, k: True,
-            )
+            ui_v2.render_ep_volumes(st, res_block_names, EP_ONLY_PARAMS + method_v2.EXTRA_PARAMS, _tep_get, _tep_set)
         if res_block_names and is_mp_stage:
             ui_v2.render_geometry(st, res_block_names)
         elif res_block_names:
             ui_v2.render_details(st, res_block_names)
         st.caption(
-            "Строки — параметры, столбцы — блоки. У паркинга вводятся коммерция, кладовые и "
+            "Площади заполняются на вкладке «Блоки» и автоматически подставляются здесь. У паркинга используются коммерция, кладовые и "
             "площадь участка; остальные ячейки закрыты."
         )
     else:
@@ -2787,7 +2792,7 @@ with sub_gz:
         with zD:
             st.markdown("**Z · прямой ввод суммы**")
             st.caption("По объектам-аналогам")
-            st.session_state.block_z_fixed[gz_block] = st.data_editor(
+            st.session_state.block_z_fixed[gz_block] = ui_v2.editor(st,
                 st.session_state.block_z_fixed[gz_block], width="stretch", num_rows="fixed",
                 hide_index=True, key=f"z_fixed_editor_{gz_block}",
                 disabled=["Код", "Статья затрат"],
@@ -2897,7 +2902,7 @@ with tab4:
         if all_block_names:
             selected_infra_block = fixed_selector("Блок", all_block_names, "infra_block_selector")
             infra_hdr = st.empty()
-            infra_edited = st.data_editor(
+            infra_edited = ui_v2.editor(st,
                 st.session_state.block_infra[selected_infra_block],
                 width="stretch",
                 num_rows="dynamic",
@@ -2930,7 +2935,7 @@ blocks["Инфраструктура блока (Z5010), руб"] = infra_total 
 if infra_summary_slot is not None:
     with infra_summary_slot:
         st.markdown("**Z.50.10 по всем блокам**")
-        st.dataframe(
+        ui_v2.readonly(st,
             pd.DataFrame({"Блок": blocks["Название блока"], "Z.50.10, руб": infra_total}),
             width="stretch", hide_index=True,
             column_config={"Z.50.10, руб": st.column_config.NumberColumn(format="localized")},
@@ -3035,7 +3040,7 @@ if box_card is not None and res_block_names:
     _i = all_block_names.index(selected_block)
     with box_card:
         st.markdown(f"**{selected_block} · прямые затраты, млн ₽**")
-        st.dataframe(
+        ui_v2.readonly(st,
             pd.DataFrame([{"Статья": a, "млн ₽": b / 1e6} for a, b in _block_cost_lines(_i)]),
             hide_index=True, width="stretch",
             column_config={"млн ₽": st.column_config.NumberColumn(format="%.1f")},
@@ -3059,7 +3064,7 @@ with park_card:
                 "Кладовые": blocks["S кладовых, м2"].iloc[i] * blocks["Ставка СМР кладовых паркинга, руб/м2"].iloc[i] * cost_factor,
                 "СМР паркинга": park_block_smr_raw[i] * cost_factor,
             })
-        st.dataframe(
+        ui_v2.readonly(st,
             pd.DataFrame(_pc), hide_index=True, width="stretch",
             column_config={c: st.column_config.NumberColumn(format="localized") for c in ["Машиноместа", "Коммерция", "Кладовые", "СМР паркинга"]},
         )
@@ -3089,7 +3094,7 @@ with tab5:
             _q, _r = qty_by_basis[_c][_i], method_v2.number(_rates.get(_c))
             if _q > 0 and _r <= 0:
                 _missing.append(f"{_name} · {_c}: заполните ставку или подтвердите отсутствие работ")
-            elif _r > 0 and _q <= 0 and not (_c.startswith("D.30.20.") and st.session_state.thermal_included.get(_name)):
+            elif _r > 0 and _q <= 0 :
                 _missing.append(f"{_name} · {_c}: заполните объём")
     if method_issues or _missing:
         st.warning("Расчёт неполный: есть незаполненные данные или замечания к объёмам.")
@@ -3131,7 +3136,7 @@ with tab5:
         .map(lambda v: "color: #AE4B67" if isinstance(v, (int, float)) and v < 0 else "",
              subset=["Валовая прибыль", "Валовая рентабельность"])
     )
-    st.dataframe(
+    ui_v2.readonly(st,
         _styler, width="stretch", hide_index=True,
         column_config={
             "Название блока": st.column_config.TextColumn("Блок"),
@@ -3199,7 +3204,7 @@ with tab5:
             st.caption("Значения по статьям — на базовых ставках (без коэффициента сценария).")
             detail_df = pd.DataFrame(item_cost_matrix, index=blocks["Название блока"]).T
             detail_df.insert(0, "Статья затрат", [code_to_name[c] for c in detail_df.index])
-            st.dataframe(detail_df, width="stretch")
+            ui_v2.readonly(st, detail_df, width="stretch")
 
 # ======================================================================
 # 10. ЭКСПОРТ В EXCEL (openpyxl) — ЖИВЫЕ ФОРМУЛЫ, 2 ЛИСТА, ВСТРОЕННЫЕ ГРАФИКИ
@@ -3232,7 +3237,7 @@ SHEET2_NAME = "СМР по методике"
 
 EXCEL_INPUT_HEADERS = [
     "Название блока", "Тип блока",
-    "S квартир, м2", "S коммерции 1 эт., м2", "S кладовых, м2",
+    "S квартир, м2", "S коммерции 1 эт., м2", "S кладовых, м2", "Площадь участка блока, га",
     "Подземный паркинг, м/м", "Наземный/Многоуровневый паркинг, м/м",
     "Цена жилья, руб/м2", "Цена коммерции, руб/м2", "Цена кладовых, руб/м2",
     "Цена подземного м/м, руб", "Цена наземного м/м, руб",
@@ -4328,8 +4333,11 @@ def build_excel_report() -> bytes:
             for _cell in _row:
                 if _cell.data_type == "f":
                     _cell.fill = ui_v2.GRAY
+    ui_v2.add_review_report(wb, st.session_state, blocks, active_items, is_mp_stage, item_cost_matrix,
+        qty_by_basis, cost_factor, HELPER_SHEET_NAME, COL, first_row1, r_leaf_formula,
+        ITEMS_G_AREA, ITEMS_G_LENGTH, ITEMS_Z_PCT, ITEMS_Z_FIXED)
     wb.calculation.fullCalcOnLoad = True
-    desired_order = ["Дашборд", SHEET1_NAME, SHEET2_NAME, "ТЭП A–E", "Геометрия МП", "Детализация ЭП", "Источники ставок A–E", "G и Z — суммы статей", "Косвенные — состав", "Инфраструктура — состав", HELPER_SHEET_NAME]
+    desired_order = ["Дашборд", "Блоки", "Бюджет по статьям", "Элементы B20.10", "Косвенные", SHEET1_NAME, SHEET2_NAME, "ТЭП A–E", "Геометрия МП", "Детализация ЭП", "Источники ставок A–E", "G и Z — суммы статей", "Косвенные — состав", "Инфраструктура — состав", HELPER_SHEET_NAME]
     wb._sheets = [wb[name] for name in desired_order if name in wb.sheetnames]
     wb.active = 0
 

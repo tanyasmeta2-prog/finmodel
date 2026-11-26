@@ -5,7 +5,7 @@ import pandas as pd
 
 RATE = "Ставка, руб/ед."
 SECTION_COLS = ["Секция / стилобат", "Количество", "S этажа, м2", "Этажей", "Периметр, м", "Сблокированные торцы, м2", "Стилобат (1/0)"]
-DETAIL_COLS = ["Категория", "Тип / материал / размеры", "Объем", RATE, "Аналог", "Дата цен", "Состав работ / комментарий"]
+DETAIL_COLS = ["ID", "Тип", "Статус", "Категория", "Тип / материал / размеры", "Объем", RATE, "Аналог", "Дата цен", "Состав работ / комментарий"]
 # Internal detail suffixes preserve the corporate parent code.
 DETAIL_SPEC = {
     "Кладка наружных стен": ("B.20.10.01", "м² фасада"),
@@ -41,8 +41,7 @@ EXTRA_PARAMS = [
  ("Дверей технических помещений, шт", "Двери техпомещений", "шт"),
  ("Дверей входных групп, шт", "Двери входных групп", "шт"),
  ("Площадь холлов МОП, м2", "Холлы МОП", "м²"),
- ("ИТП, комплектов на этап", "ИТП на этап", "компл."),
- ("Котельная, комплектов на этап", "Котельная на этап", "компл."),
+ ("ИТП / котельная, комплектов на этап", "ИТП / котельная на этап", "компл."),
 ]
 
 def number(v):
@@ -57,17 +56,13 @@ def stage_catalog(ep_items):
     result = []
     for code, name, group, unit, basis, default in ep_items:
         if code == "B.20.10":
-            for category, (child, child_unit) in DETAIL_SPEC.items():
-                result.append((child, category, "B", "руб/" + child_unit, child, 0))
+            result.append((code, "Наружные стены и фасадные элементы", "B", "руб/м² фасада", "AREA_FACADE", 0))
         elif code == "B.20.30":
             result.append((code, "Квартирные входные двери", group, "руб/дверь", "APT_COUNT", 0))
             for suffix, label, key in [("01", "Двери МОП", "Дверей МОП, шт"), ("02", "Двери технических помещений", "Дверей технических помещений, шт"), ("03", "Двери входных групп", "Дверей входных групп, шт")]:
                 result.append((code + "." + suffix, label, group, "руб/дверь", key, 0))
         elif code == "D.30.30":
-            result.extend([
-                ("D.30.20.01", "ИТП — комплект на этап", "D", "руб/комплект", "ИТП, комплектов на этап", 0),
-                ("D.30.20.02", "Котельная — комплект на этап", "D", "руб/комплект", "Котельная, комплектов на этап", 0),
-            ])
+            result.append(("D.30.20", "ИТП / котельная — комплект на этап", "D", "руб/комплект", "ИТП / котельная, комплектов на этап", 0))
             result.append((code, name, group, unit, basis, default))
         elif code == "E.20.10":
             result.append((code, name, group, "руб/м² холла", "Площадь холлов МОП, м2", 0))
@@ -80,7 +75,7 @@ def stage_catalog(ep_items):
 
 def rates_frame(items):
     return pd.DataFrame([{"Код": c, "Статья затрат": n, "Группа": g, "Единица измерения": u, "_basis": b,
-                          RATE: 0.0, "Применимость": "Уточнить", "Аналог": "", "Дата цен": "", "Состав работ / комментарий": ""}
+                          RATE: 0.0, "Применимость": "Применяется", "Аналог": "", "Дата цен": "", "Состав работ / комментарий": ""}
                          for c, n, g, u, b, _ in items])
 
 
@@ -159,8 +154,5 @@ def legacy_issues(old):
 
 
 def effective_rates(frame):
-    result = pd.to_numeric(frame.set_index("Код")[RATE], errors="coerce").fillna(0.0)
-    if "Применимость" in frame:
-        off = frame.loc[frame["Применимость"] == "Не требуется", "Код"]
-        result.loc[result.index.isin(off)] = 0.0
-    return result
+    # All catalogue articles are mandatory. Completeness is explicit for B20.10 elements.
+    return pd.to_numeric(frame.set_index("Код")[RATE], errors="coerce").fillna(0.0)

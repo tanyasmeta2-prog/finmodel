@@ -1,4 +1,5 @@
 import ast
+import pytest
 from io import BytesIO
 from pathlib import Path
 import subprocess
@@ -92,68 +93,129 @@ def check(at):
     return at.session_state['_capture']
 
 
-def test_ep_doors_itp_details_scenario_and_excel_roundtrip():
+def test_review_modes_details_thermal_scenario_and_roundtrip():
+    from review_v3 import HEAT_KEY
     at=app()
+    b=at.session_state['blocks_df'].copy()
+    b.loc[0,'S квартир, м2']=1000;b.loc[0,'Площадь участка блока, га']=2
+    at.session_state['blocks_df']=b
     tep=at.session_state['tep_store']['УБ 1']
-    tep.update({'Кол-во квартир, шт':10,'Дверей МОП, шт':3,'ИТП, комплектов на этап':1,
-                'Котельная, комплектов на этап':1,'Площадь холлов МОП, м2':20,
-                'Общая площадь квартир (с летними, с коэф.), м2':1000,'Площадь участка блока, га':2})
+    tep.update({'Кол-во квартир, шт':10,'Дверей МОП, шт':3,HEAT_KEY:1,'Площадь холлов МОП, м2':20,'Площадь фасада, м2':100})
+    at.session_state['thermal_kind']['УБ 1']='ИТП'
     at.session_state['ep_details']['УБ 1']=pd.DataFrame([
-        {'Категория':'Кладка наружных стен','Тип / материал / размеры':'мокрый','Объем':100,m.RATE:10},
-        {'Категория':'Отделка фасада','Тип / материал / размеры':'мокрый','Объем':100,m.RATE:20},
-        {'Категория':'Входные группы без площади','Объем':2,m.RATE:100},
-        {'Категория':'Террасы верхних этажей','Объем':10,m.RATE:5}],columns=m.DETAIL_COLS)
-    for code, rate in [('B.20.30',100),('B.20.30.01',50),('D.30.20.01',2000),('D.30.20.02',4000),('E.20.10',10)]:
-        set_rate(at,'block_rates',code,rate)
-    g=at.session_state['block_g_area']['УБ 1'].copy();g.loc[g['Код']=='G.20.50',m.RATE]=100
-    at.session_state['block_g_area']['УБ 1']=g
-    z=at.session_state['block_z_pct']['УБ 1'].copy();z.loc[z['Код']=='Z.10.10','Ставка, доля от СМР+G']=0.1
-    at.session_state['block_z_pct']['УБ 1']=z
+        {'Категория':'Отделка фасада','Тип / материал / размеры':'Навесной керамика','Объем':100,m.RATE:20,'Статус':'Рассчитан'},
+        {'Категория':'Отделка фасада','Тип / материал / размеры':'Навесной металл','Объем':50,m.RATE:30,'Статус':'Рассчитан'},
+        {'Категория':'Экраны','Объем':0,m.RATE:0,'Статус':'Не требуется'}],columns=m.DETAIL_COLS)
+    at.session_state['facade_modes']['УБ 1']='Детальный'
+    for code,rate in [('B.20.30',100),('B.20.30.01',50),('D.30.20',2000),('E.20.10',10),('B.20.10',999)]:set_rate(at,'block_rates',code,rate)
+    g=at.session_state['block_g_area']['УБ 1'].copy();g.loc[g['Код']=='G.20.50',m.RATE]=100;at.session_state['block_g_area']['УБ 1']=g
+    z=at.session_state['block_z_pct']['УБ 1'].copy();z.loc[z['Код']=='Z.10.10','Ставка, доля от СМР+G']=.1;at.session_state['block_z_pct']['УБ 1']=z
     at.session_state['scenario_select']='Стресс'
     capture=check(at)
-    assert capture['box']==[10600.0]
+    assert capture['item']['B.20.10']==[3500]
+    assert capture['box']==[6850]
     assert capture['g']==[200]
-    assert capture['base']==[10800]
-    assert capture['z']==[1080]
+    assert capture['base']==[7050]
+    assert capture['z']==[705]
     assert capture['cost_factor']==1.15
     parsed=at.session_state['_roundtrip']
-    assert parsed['tep_store']['УБ 1']['Дверей МОП, шт']==3
-    assert parsed['block_rates']['УБ 1'].set_index('Код').loc['D.30.20.01',m.RATE]==2000
-    assert len(parsed['ep_details']['УБ 1'])==4
+    assert parsed['thermal_kind']['УБ 1']=='ИТП'
+    assert parsed['facade_modes']['УБ 1']=='Детальный'
+    assert len(parsed['ep_details']['УБ 1'])==3
+    assert parsed['ep_details']['УБ 1']['Тип'].tolist()[:2]==['ТИП 1','ТИП 2']
+    assert parsed['ep_details']['УБ 1']['ID'].tolist()==at.session_state['ep_details']['УБ 1']['ID'].tolist()
     wb=load_workbook(BytesIO(capture['excel']),data_only=False)
-    assert 'Косвенные — состав' in wb
-    assert 'G и Z — суммы статей' in wb
-    assert not any('#REF!' in str(c.value) for ws in wb for row in ws for c in row)
-    at.session_state['thermal_included']['УБ 1']=True
-    # Reset widget value to simulate a changed checkbox before rendering.
-    at.session_state['thermal_included_widget_УБ 1']=True
+    assert all(n in wb for n in ['Блоки','Бюджет по статьям','Элементы B20.10','Косвенные'])
+    assert not any('ИТП' in str(c.value) or 'Котельная' in str(c.value) for row in wb['Блоки'] for c in row)
+    f=wb['Элементы B20.10']
+    assert f.row_dimensions[6].collapsed
+    assert f.row_dimensions[7].hidden
+    assert f['J6'].value=='=SUM(J7:J9)'
+    assert "$E$4" in f["K6"].value
+    assert any(d.hidden and d.outlineLevel==1 for d in wb['Бюджет по статьям'].column_dimensions.values())
+    at.session_state['facade_modes']['УБ 1']='Укрупнённый'
+    # Rendered group A does not own the B mode widget, so state is authoritative here.
     capture=check(at)
-    assert capture['box']==[4600.0]
+    assert capture['item']['B.20.10']==[99900]
 
 
 def test_mp_geometry_rates_are_separate_from_ep_and_roundtrip():
-    at=app()
-    at.session_state['design_stage']='МП (мастер-план)'
-    at.session_state['_stage_seg']='МП'
-    at.session_state['tep_store']['УБ 1']['Общая площадь квартир (с летними, с коэф.), м2']=1000
+    at=app();at.session_state['design_stage']='МП (мастер-план)';at.session_state['_stage_seg']='МП'
+    b=at.session_state['blocks_df'].copy();b.loc[0,'S квартир, м2']=1000;at.session_state['blocks_df']=b
     at.session_state['mp_sections']['УБ 1']=pd.DataFrame([dict(zip(m.SECTION_COLS,['С1',2,500,10,100,600,0]))])
-    for code,rate in [('A.10',10),('A.20',20),('B.10',30),('B.20',40),('B.30',50),('C.10',60),('E.20',70)]:
-        set_rate(at,'block_mp_rates',code,rate)
+    for code,rate in [('A.10',10),('A.20',20),('B.10',30),('B.20',40),('B.30',50),('C.10',60),('E.20',70)]:set_rate(at,'block_mp_rates',code,rate)
     capture=check(at)
     assert capture['box']==[656140.0]
     assert capture['quantity']['E.20']==[2]
-    parsed=at.session_state['_roundtrip']
-    assert len(parsed['mp_sections']['УБ 1'])==1
+    parsed=at.session_state['_roundtrip'];assert len(parsed['mp_sections']['УБ 1'])==1
     assert parsed['block_mp_rates']['УБ 1'].set_index('Код').loc['B.10',m.RATE]==30
     assert parsed['block_rates']['УБ 1'].set_index('Код').loc['B.10.10',m.RATE]==0
+
+
+def test_facade_partial_data_is_never_an_implicit_topup():
+    from review_v3 import facade_cost
+    rows=[{'Категория':'Отделка фасада','Объем':100,m.RATE:20,'Статус':'Рассчитан'},
+          {'Категория':'Корзины кондиционеров','Объем':10,m.RATE:100,'Статус':'Нет данных'},
+          {'Категория':'Экраны','Объем':10,m.RATE:999,'Статус':'Не требуется'}]
+    amount,issues=facade_cost(rows,1000,8000,'Детальный');assert amount==2000 and len(issues)==1
+    assert facade_cost(rows,1000,8000,'Укрупнённый')==(8000000,[])
+    assert facade_cost([],1000,8000,'Детальный')==(8000000,[])
+    rows[0]['Объем']=0
+    assert facade_cost(rows,1000,8000,'Детальный')[0]==0
+
+
+def test_detail_identity_and_type_numbers_are_stable():
+    from review_v3 import normalise_details
+    d=normalise_details(pd.DataFrame([{'Категория':'Отделка фасада','Объем':1,m.RATE:2},{'Категория':'Отделка фасада','Объем':2,m.RATE:3}]))
+    again=normalise_details(d)
+    assert d['ID'].tolist()==again['ID'].tolist()
+    assert d['Тип'].tolist()==['ТИП 1','ТИП 2']
+    assert again[m.RATE].tolist()==[2,3]
+
+
+def test_multiple_blocks_export_separators_all_groups_and_indirect_details():
+    from review_v3 import HEAT_KEY
+    at=app()
+    base=at.session_state['blocks_df'].iloc[0].to_dict()
+    b2={**base,'Название блока':'УБ 2','S квартир, м2':500}
+    park={**base,'Название блока':'П 1','Тип блока':'Наземный/Многоуровневый паркинг','S квартир, м2':0,'Наземный/Многоуровневый паркинг, м/м':10}
+    base['S квартир, м2']=1000
+    at.session_state['blocks_df']=pd.DataFrame([base,b2,park])
+    check(at)
+    for name,area,rate in [('УБ 1',100,20),('УБ 2',200,30)]:
+        at.session_state['tep_store'][name].update({'Площадь фасада, м2':area,HEAT_KEY:1})
+        at.session_state['ep_details'][name]=pd.DataFrame([{'Категория':'Отделка фасада','Объем':area,m.RATE:rate,'Статус':'Рассчитан'}])
+        at.session_state['facade_modes'][name]='Детальный'
+    at.session_state['indirect_items']['land']=pd.DataFrame([{'Наименование':'Участок 1','Сумма, руб':100},{'Наименование':'Участок 2','Сумма, руб':200}])
+    at.session_state['indirect_items']['landscape']=pd.DataFrame([{'Наименование':'Озеленение общей территории','Сумма, руб':70},{'Наименование':'Покрытия общей территории','Сумма, руб':30}])
+    capture=check(at)
+    assert capture['item']['B.20.10']==[2000,6000,0]
+    assert capture['allocation']==pytest.approx([400*2/3,400/3,0])
     wb=load_workbook(BytesIO(capture['excel']),data_only=False)
-    assert any('SUMIF' in str(c.value) for row in wb['СМР по методике'] for c in row)
+    facade=wb['Элементы B20.10']
+    parents=[r[0].row for r in facade.iter_rows(min_row=6) if r[1].value=='B20.10']
+    assert len(parents)==2 and all(facade.row_dimensions[r].collapsed for r in parents)
+    assert all(facade.row_dimensions[r+1].hidden for r in parents)
+    indirect=wb['Косвенные']
+    values=[c.value for row in indirect for c in row]
+    assert all(v in values for v in ['Участок 1','Участок 2','Озеленение общей территории','Покрытия общей территории'])
+    sums=wb['Бюджет по статьям']
+    assert len([d for d in sums.column_dimensions.values() if d.hidden and d.outlineLevel==1])==3
+    assert sums['J6'].value is None
     assert not any('#REF!' in str(c.value) for ws in wb for row in ws for c in row)
+    (ROOT/'test_report.xlsx').write_bytes(capture['excel'])
 
 
-def test_no_work_status_keeps_quoted_rate_but_excludes_charge():
-    f=m.rates_frame(m.MP_ITEMS)
-    f.loc[f['Код']=='A.10',m.RATE]=100
-    f.loc[f['Код']=='A.10','Применимость']='Не требуется'
-    assert f.set_index('Код').loc['A.10',m.RATE]==100
-    assert m.effective_rates(f)['A.10']==0
+def test_migrate_old_heat_does_not_double_charge():
+    from review_v3 import prepare,HEAT_KEY
+    class State(dict):
+        __getattr__=dict.__getitem__
+        __setattr__=dict.__setitem__
+    old=m.rates_frame([('D.30.20.01','ИТП','D','руб/компл.','x',0),('D.30.20.02','Котельная','D','руб/компл.','x',0)])
+    old[m.RATE]=[100,200]
+    ss=State(block_rates={'УБ 1':old},tep_store={'УБ 1':{'ИТП, комплектов на этап':1,'Котельная, комплектов на этап':1}})
+    items=[('D.30.20','ИТП / котельная','D','руб/компл.',HEAT_KEY,0)]
+    prepare(ss,['УБ 1'],items)
+    assert ss.thermal_kind['УБ 1']=='ИТП' and ss.tep_store['УБ 1'][HEAT_KEY]==1
+    assert ss.block_rates['УБ 1'].set_index('Код').loc['D.30.20',m.RATE]==100
+    assert ss.legacy_warnings and 'УБ 1' in ss.legacy_rates
