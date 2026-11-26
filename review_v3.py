@@ -60,7 +60,7 @@ def prepare(ss, names, ep_items):
         ss.block_mp_rates[name]['Применимость']='Применяется'
         ss.mp_sections.setdefault(name,pd.DataFrame(columns=SECTION_COLS))
         ss.ep_details[name]=normalise_details(ss.ep_details.get(name,pd.DataFrame(columns=DETAIL_COLS)))
-        ss.facade_modes.setdefault(name,'Детальный' if len(ss.ep_details[name]) else 'Укрупнённый')
+        ss.facade_modes.setdefault(name, 'Укрупнённый')
     ss.methodology_revision=3
 
 
@@ -87,6 +87,12 @@ NUMBER_SEPARATORS = str.maketrans({',': ' ', '.': ','})
 NUMBER_INPUT = r'^[+-]?(?:(?:[0-9]+|[0-9]{1,3}(?:[ \u00a0\u202f][0-9]{3})+)(?:[,.][0-9]+)?|[,.][0-9]+)$'
 
 
+def active_facade_cost(rows, area, rate, mode):
+    if mode == 'Детальный' and not rows:
+        return 0.0, ['B20.10: добавьте элементы или примените укрупнённый расчёт.']
+    return facade_cost(rows, area, rate, mode)
+
+
 def format_number(value):
     if pd.isna(value):
         return '—'
@@ -104,6 +110,8 @@ def _column_config(frame, config, disabled=(), readonly=False):
         label = re.sub(r'^[✎🔒🟨🟦⬜\s]+', '', label).replace(' · СЭО', '').replace('СЭО · ', '').replace(' · проект', '')
         locked = disabled is True or column in locked_columns or settings.get('disabled') is True
         settings['label'] = label if readonly else ('🔒 ' if locked else '✎ ') + label
+        if column == frame.columns[0] and column in ('Код', 'Категория', 'Параметр'):
+            settings['pinned'] = True
         result[column] = settings
     return result
 
@@ -212,8 +220,8 @@ def legend(st):
             for msg in st.session_state.legacy_warnings:st.warning(msg)
 
 
-def render_geometry(st,names):
-    name=st.selectbox('Блок — геометрия МП',names,key='mp_geometry_block')
+def render_geometry(st, name):
+    st.caption(f'Урбан-блок · {name}')
     st.markdown('**Геометрия МП**')
     st.info(
         '**Фасад МП = Σ (количество × периметр × этажность × 3,00 м) − сблокированные торцы.**\n\n'
@@ -261,8 +269,8 @@ def render_ep_volumes(st,names,params,get,set_):
         st.session_state.thermal_kind[name] = selected
 
 
-def render_details(st,names):
-    name=st.selectbox('Блок — наружные конструкции ЭП',names,key='ep_detail_block')
+def render_details(st, name):
+    st.caption(f'Урбан-блок · {name}')
     st.markdown('**Наружные конструкции B20.10 · объёмы**')
     old=st.session_state.ep_details[name]
     cols=['ID','Категория','Тип','Тип / материал / размеры','Объем']
@@ -286,8 +294,8 @@ def render_details(st,names):
                 typ=f'ТИП {max(numbers or [0])+1}'
             row={c:'' for c in DETAIL_COLS};row.update({'ID':str(uuid4()),'Категория':category,'Тип':typ,'Объем':0.,RATE:0.,'Статус':'Нет данных'})
             st.session_state.ep_details[name]=pd.concat([old,pd.DataFrame([row])],ignore_index=True)
-            st.session_state.facade_modes[name]='Детальный';st.rerun()
-    st.caption('Отделка фасада: каждый вариант добавляется отдельной строкой ТИП 1, ТИП 2 и далее. Уточнение вводится вручную; ставки и статусы — в «Коробке A–E».')
+            st.rerun()
+    st.caption('Отделка фасада: каждый вариант добавляется отдельной строкой ТИП 1, ТИП 2 и далее. Ставки, статусы и применение расчёта — в «Коробка A–E → B».')
 
 
 def quantities(items,ss,names,is_res,blocks,nsa,get_basis,mp):
@@ -306,7 +314,7 @@ def quantities(items,ss,names,is_res,blocks,nsa,get_basis,mp):
             elif code=='B.20.10':
                 arr[i]=number(ss.tep_store[name].get('Площадь фасада, м2'))
                 r=ss.block_rates[name].set_index('Код')[RATE].get(code,0)
-                total,errs=facade_cost(ss.ep_details[name].to_dict('records'),arr[i],r,ss.facade_modes[name])
+                total,errs=active_facade_cost(ss.ep_details[name].to_dict('records'),arr[i],r,ss.facade_modes[name])
                 overrides.setdefault(code,np.zeros(len(names)))[i]=total
                 rates_override.setdefault(code,np.zeros(len(names)))[i]=total/arr[i] if arr[i] else 0
                 issues.extend(f'{name}: {e}' for e in errs)
@@ -315,37 +323,79 @@ def quantities(items,ss,names,is_res,blocks,nsa,get_basis,mp):
     return qty,overrides,rates_override,issues
 
 
-def render_rates(st,items,mp,names,qty,override_rates,group_labels,fmt_mln):
-    name=st.selectbox('Блок — ставки A–E',names,key='v2_rates_block')
+def render_rates(st, items, mp, names, qty, override_rates, group_labels, fmt_mln, *, name=None):
+    name = name or names[0]
+    identity = st.session_state.block_ids[name]
+    st.caption(f'Урбан-блок · {name}')
     store='block_mp_rates' if mp else 'block_rates';old=st.session_state[store][name]
     ni=list(st.session_state.blocks_df['Название блока']).index(name)
     group=st.segmented_control('Группа A–E',list(group_labels),default='A',format_func=lambda g:f'{g} · {group_labels[g]}',key=f'v3_group_{mp}') or 'A'
     view=old[old['Группа']==group][['Код','Статья затрат','Единица измерения',RATE]].copy()
     view['База']=[qty[c][ni] for c in view['Код']]
     view['Сумма, руб']=[float(qty[c][ni])*number(r) for c,r in zip(view['Код'],view[RATE])]
-    if not mp and group=='B':view=view[view['Код']!='B.20.10']
+    if not mp and group == 'B':
+        view = view[view['Код'] != 'B.20.10']
+    if st.checkbox('Только строки, требующие заполнения', key='rate_filter_' + str(mp)):
+        missing = view['База'].gt(0) ^ view[RATE].gt(0)
+        view = view[missing]
     if len(view):
         ed=editor(st,view,key=f'rates3_{mp}_{name}_{group}',hide_index=True,width='stretch',disabled=[c for c in view if c!=RATE],column_config={RATE:st.column_config.NumberColumn(min_value=0)})
         updated=old.copy()
         for _,row in ed.iterrows():updated.loc[updated['Код']==row['Код'],RATE]=number(row[RATE])
         if not updated.equals(old):st.session_state[store][name]=updated;st.rerun()
+    else:
+        st.caption('В этой группе нет строк для отображения.')
     if not mp and group=='B':
-        details=st.session_state.ep_details[name];available=['Укрупнённый','Детальный'] if len(details) else ['Укрупнённый']
-        mode=st.radio('B20.10 · режим',available,index=available.index(st.session_state.facade_modes[name]) if st.session_state.facade_modes[name] in available else 0,horizontal=True,key='facade_mode3_'+name)
-        if mode!=st.session_state.facade_modes[name]:st.session_state.facade_modes[name]=mode;st.rerun()
-        if mode=='Укрупнённый':
-            frame=old.loc[old['Код']=='B.20.10',['Код',RATE]].copy();frame['Площадь фасада, м²']=number(st.session_state.tep_store[name].get('Площадь фасада, м2'))
-            ed=editor(st,frame,key='facade_aggregate3_'+name,hide_index=True,width='stretch',disabled=['Код','Площадь фасада, м²'],column_config={RATE:st.column_config.NumberColumn(min_value=0)})
-            value=number(ed.iloc[0][RATE])
-            if value!=number(frame.iloc[0][RATE]):old=old.copy();old.loc[old['Код']=='B.20.10',RATE]=value;st.session_state[store][name]=old;st.rerun()
-            st.caption('Общая площадь фасада × комплексная ставка. Детальные элементы в этом режиме не начисляются.')
-        else:
-            cols=['Категория','Тип','Тип / материал / размеры','Объем',RATE,'Статус'];ed=editor(st,details[cols],key='facade_rates3_'+name,hide_index=True,width='stretch',disabled=cols[:4],column_config={RATE:st.column_config.NumberColumn(min_value=0),'Статус':st.column_config.SelectboxColumn(options=STATUSES,required=True)})
-            new=details.copy();new[RATE]=ed[RATE];new['Статус']=ed['Статус']
-            if not new.equals(details):st.session_state.ep_details[name]=new;st.rerun()
-        total,errs=facade_cost(details.to_dict('records'),number(st.session_state.tep_store[name].get('Площадь фасада, м2')),old.set_index('Код')[RATE].get('B.20.10'),mode)
-        st.metric('B20.10 · '+('частичная сумма' if errs else 'итого')+' без сценария',fmt_mln(total))
-        for msg in errs:st.warning(msg)
+        details = st.session_state.ep_details[name]
+        active_mode = st.session_state.facade_modes[name]
+        area = number(st.session_state.tep_store[name].get('Площадь фасада, м2'))
+        st.markdown(f'**B20.10 · применяется {active_mode.lower()} расчёт**')
+        if not len(details):
+            st.caption('Детализация добавляется в «Объёмах».')
+        default_view = 'Детальный' if len(details) else 'Укрупнённый'
+        editor_mode = st.radio('Редактировать B20.10', ['Укрупнённый', 'Детальный'],
+                               index=['Укрупнённый', 'Детальный'].index(default_view),
+                               horizontal=True, key=f'facade_editor_{identity}')
+        if editor_mode == 'Укрупнённый':
+            frame = old.loc[old['Код'] == 'B.20.10', ['Код', RATE]].copy()
+            frame['Площадь фасада, м²'] = area
+            ed = editor(st, frame, key='facade_aggregate3_' + name, hide_index=True,
+                        width='stretch', disabled=['Код', 'Площадь фасада, м²'],
+                        column_config={RATE: st.column_config.NumberColumn(min_value=0)})
+            value = number(ed.iloc[0][RATE])
+            if value != number(frame.iloc[0][RATE]):
+                old = old.copy()
+                old.loc[old['Код'] == 'B.20.10', RATE] = value
+                st.session_state[store][name] = old
+                st.rerun()
+        elif len(details):
+            cols = ['Категория', 'Тип', 'Тип / материал / размеры', 'Объем', RATE, 'Статус']
+            ed = editor(st, details[cols], key='facade_rates3_' + name, hide_index=True, width='stretch',
+                        disabled=cols[:4], column_config={
+                            RATE: st.column_config.NumberColumn(min_value=0),
+                            'Статус': st.column_config.SelectboxColumn(options=STATUSES, required=True),
+                        })
+            new = details.copy()
+            new[RATE] = ed[RATE]
+            new['Статус'] = ed['Статус']
+            if not new.equals(details):
+                st.session_state.ep_details[name] = new
+                st.rerun()
+        rows = details.to_dict('records')
+        rate = old.set_index('Код')[RATE].get('B.20.10')
+        active_total, active_issues = active_facade_cost(rows, area, rate, active_mode)
+        preview_total, preview_issues = active_facade_cost(rows, area, rate, editor_mode)
+        c1, c2 = st.columns(2)
+        c1.metric('Текущая сумма без сценария', fmt_mln(active_total))
+        c2.metric('Сумма выбранного режима без сценария', fmt_mln(preview_total))
+        for msg in dict.fromkeys(active_issues + preview_issues):
+            st.warning(msg)
+        if editor_mode != active_mode:
+            label = ('Применить детальный расчёт' if editor_mode == 'Детальный'
+                     else 'Применить укрупнённый расчёт')
+            if st.button(label, key=f'apply_facade_{name}', disabled=bool(preview_issues)):
+                st.session_state.facade_modes[name] = editor_mode
+                st.rerun()
     with st.expander(('Инженерия · комментарии к статьям' if group=='D' else 'Состав ставки')+' · необязательно'):
         st.caption('Уточнение границ состава ставки')
         comments=old[old['Группа']==group][['Код','Статья затрат',COMMENT]].copy()
@@ -384,10 +434,10 @@ def add_review_report(wb,ss,blocks,items,mp,item_costs,qty,factor,helper,colmap,
         if name not in ss.ep_details:continue
         if facade_parent:fac.append(['']);fac.row_dimensions[fac.max_row].height=14
         parent=fac.max_row+1;facade_parent[name]=parent
-        details=ss.ep_details[name];mode=ss.facade_modes[name] if len(details) else 'Укрупнённый'
+        details=ss.ep_details[name];mode=ss.facade_modes[name]
         rate=number(ss.block_rates[name].set_index('Код')[RATE].get('B.20.10'))
         area=number(ss.tep_store[name].get('Площадь фасада, м2'))
-        amount,issues=facade_cost(details.to_dict('records'),area,rate,mode)
+        amount,issues=active_facade_cost(details.to_dict('records'),area,rate,mode)
         fac.append([name,'B20.10','Наружные стены и фасадные элементы',mode,'Частичная сумма' if issues else '', 'м² фасада',area,rate,'Нет данных' if issues else 'Рассчитан',None,f'=J{parent}*{factor_ref}'])
         start=parent+1
         for _,r in details.iterrows():
@@ -397,7 +447,7 @@ def add_review_report(wb,ss,blocks,items,mp,item_costs,qty,factor,helper,colmap,
             fac.append([name,code,category,r['Тип'],r['Тип / материал / размеры'],unit,number(r['Объем']),number(r[RATE]),r['Статус'],f'=G{row}*H{row}' if valid else 0,f'=J{row}*{factor_ref}' if mode=='Детальный' else 0])
             detail_source[(name,str(r['ID']))]=row
         end=fac.max_row
-        fac.cell(parent,10,f'=SUM(J{start}:J{end})' if mode=='Детальный' and end>=start else f'=G{parent}*H{parent}')
+        fac.cell(parent,10,(f'=SUM(J{start}:J{end})' if end>=start else '=0') if mode=='Детальный' else f'=G{parent}*H{parent}')
         if end>=start:
             fac.row_dimensions.group(start,end,hidden=True);fac.row_dimensions[parent].collapsed=True
     finish(fac, totals=set(facade_parent.values()));fac.column_dimensions['C'].width=38;fac.column_dimensions['E'].width=38
