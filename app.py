@@ -5,7 +5,7 @@
 Универсальный расчет экономики проекта (от 1 до N блоков) на уровне
 Валовой прибыли и Валовой рентабельности (без налогов и кредитов).
 
-Версия 2 конфигуратора — расчет A–E раздельно по стадиям:
+Версия 3 конфигуратора — расчет A–E раздельно по стадиям:
 МП — статьи второго уровня и геометрия секций;
 ЭП — виды работ и детализация фасадных элементов.
 Наружные работы G, паркинги и инфраструктура — по прежней схеме.
@@ -49,6 +49,10 @@ import methodology_v2 as method_v2
 import version2_ui as ui_v2
 import report_presentation as report
 import sparse_excel
+from configurator_workflow import (
+    BLOCKS, PRICES, SMR, INDIRECT, RESULTS, VOLUMES, RATES, PARKING, GZ, BLOCK_ID,
+    Issue, block_identity, reconcile_blocks, pair_issue,
+)
 from PIL import Image as PILImage
 
 from openpyxl import Workbook
@@ -877,10 +881,10 @@ def generate_default_table() -> pd.DataFrame:
 #   • Локальная папка рядом с app.py — если токена нет (запуск на своем ПК).
 #     На Streamlit Cloud локальный диск временный — данные теряются при
 #     перезапуске, поэтому там нужен Яндекс Диск.
-SAVES_DIR = Path(__file__).resolve().parent / "talan_model_saves_v2"
-POINTER_PATH = Path(__file__).resolve().parent / "talan_model_last_opened_v2.json"
+SAVES_DIR = Path(__file__).resolve().parent / "talan_model_saves_v3"
+POINTER_PATH = Path(__file__).resolve().parent / "talan_model_last_opened_v3.json"
 YA_API = "https://cloud-api.yandex.net/v1/disk/resources"
-YA_FOLDER = "app:/projects_v2"
+YA_FOLDER = "app:/projects_v3"
 YA_TIMEOUT = 20  # сек на один HTTP-запрос
 YA_LIST_TTL = 20  # сек — кэш списка проектов в сессии
 
@@ -1205,8 +1209,9 @@ def autosave_write(ref: str, user_name: str, project_name: str) -> None:
                 encoding="utf-8",
             )
         st.session_state["_last_saved_sig"] = sig
+        st.session_state.pop("_save_write_error", None)
     except Exception:
-        pass
+        st.session_state["_save_write_error"] = True
 
 
 def _storage_read(ref: str):
@@ -1289,9 +1294,9 @@ if "user_name_input" not in st.session_state:
 if "design_stage" not in st.session_state:
     st.session_state.design_stage = STAGE_EP  # общий на весь проект переключатель МП/ЭП для расчета коробки (A-E)
 if "project_name_input" not in st.session_state:
-    st.session_state["project_name_input"] = "ЖК «Пример»"
+    st.session_state["project_name_input"] = ""
 if "project_city_input" not in st.session_state:
-    st.session_state["project_city_input"] = "Самара"
+    st.session_state["project_city_input"] = ""
 if "scenario_select" not in st.session_state or st.session_state["scenario_select"] not in SCENARIOS:
     st.session_state["scenario_select"] = list(SCENARIOS.keys())[0]
 
@@ -1342,17 +1347,8 @@ def _bump(key: str) -> None:
     st.session_state[f"_ver_{key}"] = st.session_state.get(f"_ver_{key}", 0) + 1
 
 
-def fixed_selector(label: str, options: list, key: str, **kw):
-    """Выбор блока кнопками. Значение всегда из списка (при удалении/переименовании
-    блока или снятии выбора — первый блок)."""
-    if st.session_state.get(key) not in options:
-        st.session_state[key] = options[0]
-    val = st.segmented_control(label, options, key=key, **kw)
-    return val if val in options else options[0]
-
-
 def base_row_table(store_key: str, cols: list, default_keys: dict, block_names: list,
-                   editor_key: str, labels: dict, formats: dict = None) -> dict:
+                   editor_key: str, labels: dict, formats: dict = None, visible_names=None) -> dict:
     """Таблица «База + блоки»: первая строка задает значение всем блокам, ячейка
     блока, измененная вручную, сохраняет свое значение при смене базы, «↺» —
     вернуть строку блока к базе. Хранилище — прежнее cascade-хранилище
@@ -1366,12 +1362,12 @@ def base_row_table(store_key: str, cols: list, default_keys: dict, block_names: 
         for c in cols:
             store[n][c] = _num(store[n].get(c, 0.0))
     rows = [{"Блок": BASE_ROW_LABEL, **defaults, RESET_COL: False, CHANGED_COL: ""}]
-    for n in block_names:
+    for n in block_names if visible_names is None else visible_names:
         changed = [labels[c] for c in cols if store[n][c] != defaults[c]]
         rows.append({"Блок": n, **{c: store[n][c] for c in cols}, RESET_COL: False, CHANGED_COL: ", ".join(changed)})
     df = pd.DataFrame(rows)
     cfg = {
-        "Блок": st.column_config.TextColumn(disabled=True),
+        "Блок": st.column_config.TextColumn(disabled=True, pinned=True),
         RESET_COL: st.column_config.CheckboxColumn(RESET_COL, help="Вернуть строку блока к базе", width="small"),
         CHANGED_COL: st.column_config.TextColumn(disabled=True),
     }
@@ -2310,10 +2306,9 @@ def sparse_template_fields():
     return dict(zip(sparse_excel.SHEETS, (tep, prices, volumes, rates)))
 
 
-def import_sparse_template(book):
-    updates, warns = sparse_excel.read_updates(book, sparse_template_fields())
-    changes, count = sparse_excel.merge_updates(
-        st.session_state, updates, warns, generate_default_table(),
+def plan_sparse_import(updates, warnings, audit):
+    return sparse_excel.merge_updates(
+        st.session_state, updates, warnings, generate_default_table(),
         {
             "block_rates": DEFAULT_RATES_DF,
             "block_mp_rates": method_v2.rates_frame(method_v2.MP_ITEMS),
@@ -2321,32 +2316,112 @@ def import_sparse_template(book):
             "block_z_pct": DEFAULT_Z_PCT_DF, "block_z_fixed": DEFAULT_Z_FIXED_DF,
         },
         {"_cascade_prices": PRICE_COLS, "_cascade_smr_parking": SMR_PARKING_RATE_COLS},
+        audit=audit,
     )
-    for key, value in changes.items():
-        st.session_state[key] = value
-    if count:
-        nblocks = len(changes.get("blocks_df", st.session_state.get("blocks_df", generate_default_table())))
-        return [f"Загружено значений: {count}. Блоков в проекте: {nblocks}."] + warns
-    return ["В шаблоне нет значений для загрузки. Пустые ячейки и нули пропущены."] + warns
 
 
-def _cb_import_template():
-    f = st.session_state.get("_tpl_upload")
-    if f is None:
-        st.session_state["_tpl_msgs"] = ["Сначала выберите файл."]
-        return
-    data = f.getvalue()
+def inspect_input_file(data, allow_zeros):
     book = sparse_excel.load_template(data)
-    if book is not None:
-        st.session_state["_tpl_msgs"] = import_sparse_template(book)
+    if book is None:
+        state, warnings = parse_template(data)
+        return "archive", state, warnings, []
+    skipped = []
+    updates, warnings = sparse_excel.read_updates(
+        book, sparse_template_fields(), allow_zeros=allow_zeros, skipped=skipped,
+    )
+    return "input", updates, warnings, skipped
+
+
+def apply_input_plan(kind, changes, count):
+    if kind == "archive":
+        apply_imported_state(changes)
+        st.session_state["_import_status"] = "Архив проекта восстановлен."
+    else:
+        for key, value in changes.items():
+            st.session_state[key] = value
+        st.session_state["_import_status"] = f"Применено полей: {count}."
+    st.session_state["_input_generation"] = st.session_state.get("_input_generation", 0) + 1
+    st.session_state.pop("_input_preview", None)
+
+
+def render_input_preview():
+    generation = st.session_state.get("_input_generation", 0)
+    uploaded = st.file_uploader("Файл исходных данных или архив проекта (.xlsx)", type=["xlsx"],
+                                key=f"input_file_{generation}")
+    current = st.session_state.get("blocks_df", generate_default_table())
+    names = current["Название блока"].tolist()
+    st.download_button(
+        "Скачать шаблон исходных данных", data=empty_sparse_template(tuple(names) or ("УБ 1",)),
+        file_name="Шаблон_ввода_финмодели.xlsx",
+        mime=EXCEL_MIME, on_click="ignore",
+    )
+    if uploaded is None:
         return
-    new_state, warns = parse_template(data)
-    if new_state is None:
-        st.session_state["_tpl_msgs"] = warns
+    allow_zeros = st.checkbox(
+        "Применить явно указанные нули", key=f"input_zeros_{generation}",
+        help="Пустые ячейки всегда пропускаются. Включите, если в файле нужно обнулить значения.",
+    )
+    cache_key = (uploaded.file_id, allow_zeros)
+    cached = st.session_state.get("_input_preview")
+    if cached is None or cached[0] != cache_key:
+        cached = (cache_key, inspect_input_file(uploaded.getvalue(), allow_zeros))
+        st.session_state["_input_preview"] = cached
+    kind, payload, file_warnings, file_skips = cached[1]
+    warnings, skipped = list(file_warnings), list(file_skips)
+    if kind == "archive":
+        if payload is None:
+            for msg in warnings:
+                st.error(msg)
+            return
+        st.warning(
+            f"Архив «{payload['project_name_input']}» · УБ: {len(payload['blocks_df'])}. "
+            "При восстановлении текущий расчёт на экране будет заменён."
+        )
+        for msg in warnings:
+            st.warning(msg)
+        st.button("Восстановить архив", key=f"restore_archive_{generation}",
+                  on_click=apply_input_plan, args=(kind, payload, 0))
         return
-    apply_imported_state(new_state)
-    st.session_state["_tpl_msgs"] = [f"Загружено: «{new_state['project_name_input']}», "
-                                     f"блоков — {len(new_state['blocks_df'])}."] + warns
+
+    file_names = list(dict.fromkeys(name for _, name, _, _ in payload))
+    targets = {}
+    if file_names:
+        with st.expander("Сопоставление УБ", expanded=True):
+            for pos, name in enumerate(file_names):
+                options = [("skip", ""), *(("update", n) for n in names)]
+                if name not in names:
+                    options.append(("create", name))
+                default = ("update", name) if name in names else ("create", name)
+                action, target = st.selectbox(
+                    f"УБ в файле · {name}", options, index=options.index(default),
+                    format_func=lambda option: {
+                        "skip": "Пропустить", "update": f"Обновить · {option[1]}",
+                        "create": f"Создать · {option[1]}",
+                    }[option[0]], key=f"map_input_{uploaded.file_id}_{pos}",
+                )
+                if action != "skip":
+                    targets[name] = target
+                else:
+                    skipped.append(f"УБ «{name}» пропущен по выбранному сопоставлению.")
+    if len(set(targets.values())) != len(targets):
+        st.error("Два УБ из файла сопоставлены с одним УБ проекта. Выберите разные назначения.")
+        return
+    mapped = [(address, targets[name], field, value) for address, name, field, value in payload if name in targets]
+    audit = []
+    changes, count = plan_sparse_import(mapped, warnings, audit)
+    if audit:
+        preview = pd.DataFrame(audit)
+        changed = preview[preview["Действие"] != "Без изменений"]
+        st.caption(f"Изменений: {len(changed)} · Совпадающих значений: {len(preview) - len(changed)}")
+        st.dataframe(changed if len(changed) else preview, hide_index=True, width="stretch")
+    if warnings or skipped:
+        with st.expander(f"Пропуски и замечания · {len(warnings) + len(skipped)}", expanded=bool(warnings)):
+            for msg in warnings + skipped:
+                st.write(msg)
+    if count == 0:
+        st.info("В файле нет значений для применения.")
+    st.button("Применить данные из Excel", disabled=not count, key=f"apply_excel_{generation}",
+              on_click=apply_input_plan, args=(kind, changes, count))
 
 
 @st.cache_data(show_spinner=False)
@@ -2357,6 +2432,8 @@ def empty_sparse_template(names):
 # ======================================================================
 # 4. БОКОВАЯ ПАНЕЛЬ — ПОЛЬЗОВАТЕЛЬ, ПРОЕКТЫ, ХРАНИЛИЩЕ
 # ======================================================================
+EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
 with st.sidebar:
     st.image(_talan_logo_bytes, width=150)
     st.divider()
@@ -2381,6 +2458,8 @@ with st.sidebar:
             st.session_state["_autosave_loaded"] = True
             st.session_state.pop("_last_saved_sig", None)
             st.session_state.pop("_stage_seg", None)
+            st.session_state.pop("active_block_id", None)
+            st.session_state["_entry_mode"] = "Ввести вручную"
 
     def _cb_new():
         _keep_user = st.session_state.get("user_name_input", "")
@@ -2396,10 +2475,10 @@ with st.sidebar:
             on_click=_cb_open, args=(_picked_save["ref"] if _picked_save else None,),
         )
     with sb2:
-        st.button(
-            "Новый", width="stretch", on_click=_cb_new,
-            help="Очистить экран для нового проекта. Сохранённые проекты не удаляются.",
-        )
+        with st.popover("Новый", width="stretch"):
+            st.write("Перед сбросом текущего расчёта можно скачать архив и продолжить работу позже.")
+            reset_archive_slot = st.empty()
+            st.button("Создать новый проект", on_click=_cb_new, width="stretch")
     with sb3:
         with st.popover("", icon=":material/delete:", disabled=_picked_save is None, help="Удалить выбранный проект", width="stretch"):
             st.write(f"Удалить «{_picked}»?")
@@ -2420,51 +2499,6 @@ with st.sidebar:
                 st.session_state.pop("_last_saved_sig", None)
                 st.rerun()
 
-    with st.expander("Данные из Excel", icon=":material/table_view:"):
-        st.caption("Шаблон заполняет только указанные ненулевые значения. Названия УБ указываются на листе «ТЭП».")
-        _input_blocks = st.session_state.get("blocks_df", generate_default_table())
-        _input_names = tuple(_input_blocks["Название блока"].astype(str))
-        st.download_button(
-            "Скачать шаблон ввода", data=empty_sparse_template(_input_names or ("УБ 1",)),
-            file_name="Шаблон_ввода_финмодели.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch",
-            icon=":material/download:",
-        )
-        st.caption("Архив Excel сохраняет текущий проект целиком. При загрузке архива данные на экране заменяются.")
-        try:
-            _export_bytes = build_template_bytes(collect_template_data())
-        except Exception:
-            _export_bytes = None
-        if _export_bytes:
-            st.download_button(
-                "Скачать архив проекта", data=_export_bytes,
-                file_name=f"{_slugify(st.session_state.get('project_name_input', 'проект'))} — шаблон.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch",
-                icon=":material/download:",
-            )
-        st.file_uploader("Файл шаблона (.xlsx)", type=["xlsx"], key="_tpl_upload")
-        st.button(
-            "Загрузить данные", on_click=_cb_import_template, width="stretch",
-            disabled=st.session_state.get("_tpl_upload") is None,
-        )
-    _tpl_msgs = st.session_state.pop("_tpl_msgs", None)
-    if _tpl_msgs:
-        if _tpl_msgs[0].startswith("Загружено"):
-            st.success(_tpl_msgs[0])
-        else:
-            st.error(_tpl_msgs[0])
-        for _w in _tpl_msgs[1:12]:
-            st.warning(_w)
-        if len(_tpl_msgs) > 12:
-            st.warning(f"… и ещё {len(_tpl_msgs) - 12} предупреждений.")
-
-    if not st.session_state["user_name_input"].strip():
-        st.caption("⚠️ Введите имя — иначе данные не будут сохраняться.")
-    elif st.session_state.get("_autosave_loaded"):
-        st.caption("💾 Данные восстановлены из сохранения")
-    else:
-        st.caption("💾 Автосохранение включено")
-
     if STORAGE_MODE == "yadisk":
         _cur_ref = current_save_path()
         _writer = _get_ya_writer()
@@ -2477,38 +2511,50 @@ with st.sidebar:
         else:
             st.caption("☁️ Хранилище: Яндекс Диск")
     else:
-        st.caption(
-            "🖥️ Хранилище: локальная папка. На Streamlit Cloud данные теряются при "
-            "перезапуске — задайте YANDEX_DISK_TOKEN в Secrets."
-        )
+        st.caption("Хранилище на сервере. Скачайте архив, чтобы продолжить после перезапуска.")
 
 
 # ======================================================================
 # 5. ШАПКА (на всех вкладках): проект, город, стадия, сценарий, Excel + KPI
 # ======================================================================
-st.caption("Версия 2 · 26.11.2026 · МП / ЭП · обновлённая выгрузка")
+st.caption("ТАЛАН · Экспресс-модель МП и ЭП")
+st.title("Расчёт посадок · Версия 3")
 h1, h2, h3, h4, h5 = st.columns([3, 1.3, 1.1, 1.4, 1.5], vertical_alignment="bottom")
 with h1:
-    project_name = st.text_input("Проект", key="project_name_input")
+    project_name = st.text_input("Проект", placeholder="Название проекта", key="project_name_input") or "Без названия"
 with h2:
-    project_city = st.text_input("Город", key="project_city_input")
+    project_city = st.text_input("Город", placeholder="Город", key="project_city_input")
 with h3:
     if st.session_state.get("_stage_seg") not in ("МП", "ЭП"):
         st.session_state["_stage_seg"] = "МП" if st.session_state.design_stage == STAGE_MP else "ЭП"
-    _stage = st.segmented_control(
-        "Стадия", ["МП", "ЭП"], key="_stage_seg",
-        help="МП — статьи A–E второго уровня по геометрии посадки. ЭП — виды работ и объёмы по ЭП.",
+    _stage = st.radio(
+        "Стадия", ["МП", "ЭП"], key="_stage_seg", horizontal=True,
+        help="МП — расчёт по геометрии посадки. ЭП — расчёт по видам работ и объёмам.",
     )
-    if _stage in ("МП", "ЭП"):
-        st.session_state.design_stage = STAGE_MP if _stage == "МП" else STAGE_EP
+    st.session_state.design_stage = STAGE_MP if _stage == "МП" else STAGE_EP
 with h4:
     scenario_name = st.selectbox("Сценарий", list(SCENARIOS.keys()), key="scenario_select")
 with h5:
     excel_slot = st.empty()
+status_slot = st.container()
 rev_factor = SCENARIOS[scenario_name]["revenue"]
 cost_factor = SCENARIOS[scenario_name]["cost"]
 is_mp_stage = st.session_state.design_stage == STAGE_MP
 kpi_slot = st.container()
+entry, archive = st.columns([3, 2], vertical_alignment="bottom")
+with entry:
+    entry_mode = st.radio("Как заполнить модель", ["Ввести вручную", "Загрузить исходные данные"],
+                          horizontal=True, key="_entry_mode")
+with archive:
+    archive_slot = st.empty()
+if message := st.session_state.pop("_import_status", None):
+    st.success(message)
+if entry_mode == "Загрузить исходные данные":
+    with st.container(border=True):
+        st.caption("Шаблон обновляет отдельные поля. Архив восстанавливает полный расчёт.")
+        render_input_preview()
+validation_slot = st.container()
+focus_slot = st.container()
 
 # ======================================================================
 # 6. ХРАНИЛИЩА ВВОДА (session_state)
@@ -2537,7 +2583,7 @@ if "tep_store" not in st.session_state:
     st.session_state.tep_store = {}  # имя блока -> {поле ТЭП: значение}
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["1. Блоки", "2. Цены", "3. СМР", "4. Инфраструктура и косвенные", "5. Итоги"]
+    [BLOCKS, PRICES, SMR, INDIRECT, RESULTS], key="workflow_tab", on_change="rerun",
 )
 
 # ------------------------------------------------------------------
@@ -2571,8 +2617,11 @@ with tab1:
         _view["S квартир, м2"] + _view["S коммерции 1 эт., м2"] + _view["S кладовых, м2"],
         _view["S коммерции 1 эт., м2"] + _view["S кладовых, м2"],
     )
+    _identities = block_identity(st.session_state, _view["Название блока"])
+    _view[BLOCK_ID] = _view["Название блока"].map(_identities)
     column_config = {
-        "Название блока": st.column_config.TextColumn("Название", required=True, width="small"),
+        BLOCK_ID: None,
+        "Название блока": st.column_config.TextColumn("Название", required=True, width="medium", pinned=True),
         "Тип блока": st.column_config.SelectboxColumn(options=BLOCK_TYPES, required=True, width="medium"),
         "NSA, м2": st.column_config.NumberColumn("NSA, м²", format="localized", disabled=True, width="small",
                                                  help="Продаваемая площадь: квартиры + коммерция + кладовые"),
@@ -2599,10 +2648,11 @@ with tab1:
         width="stretch",
         hide_index=True,
         key="blocks_editor",
+        disabled=[BLOCK_ID],
         column_order=MAIN_TABLE_COLS + ["NSA, м2"],
         column_config=column_config,
     )
-    blocks = edited[MAIN_TABLE_COLS].copy()
+    blocks = edited[MAIN_TABLE_COLS + [BLOCK_ID]].copy()
     for col in MAIN_TABLE_NUMERIC_COLS:
         blocks[col] = pd.to_numeric(blocks[col], errors="coerce").fillna(0.0)
     blocks["Название блока"] = blocks["Название блока"].fillna("").astype(str).str.strip()
@@ -2621,6 +2671,11 @@ with tab1:
         _seen[_n] = True
         _names.append(_n)
     blocks["Название блока"] = _names
+    _block_stores = _SAVE_DICT_OF_DF_KEYS + [
+        "tep_store", "block_mp_rate", "block_elevator_stops", "thermal_kind", "facade_modes",
+        "thermal_included", "_cascade_prices", "_cascade_smr_parking", "_cascade_mp_korobka",
+    ]
+    identities = reconcile_blocks(st.session_state, _identities, blocks.pop(BLOCK_ID), _names, _block_stores)
     if _renamed:
         st.warning("Пустые и повторяющиеся названия блоков переименованы — названия должны быть уникальны.")
     N_ROWS = len(blocks)
@@ -2634,6 +2689,15 @@ all_block_names = list(blocks["Название блока"])
 res_block_names = list(blocks.loc[is_res, "Название блока"])
 park_block_names = list(blocks.loc[is_park, "Название блока"])
 block_type_of = dict(zip(blocks["Название блока"], blocks["Тип блока"]))
+names_by_id = {identity: name for name, identity in identities.items()}
+if st.session_state.get("active_block_id") not in names_by_id:
+    st.session_state["active_block_id"] = next(iter(names_by_id), None)
+with focus_slot:
+    selected_id = st.selectbox("Урбан-блок для разделов СМР и инфраструктуры", list(names_by_id),
+                               format_func=names_by_id.__getitem__, key="active_block_id",
+                               disabled=not names_by_id)
+focus_block = names_by_id.get(selected_id)
+
 
 # ТЭП-хранилище — по каждому блоку (у паркинга используются коммерция, кладовые,
 # площадь участка)
@@ -2745,20 +2809,24 @@ def _tep_set(n, k, v):
 
 
 with tab3:
-    sub_ep, sub_box, sub_park, sub_gz = st.tabs(["Объёмы", "Коробка A–E", "Паркинг", "G и Z"])
+    sub_ep, sub_box, sub_park, sub_gz = st.tabs([VOLUMES, RATES, PARKING, GZ], key="smr_tab", on_change="rerun")
 
 with sub_ep:
     ui_v2.legend(st)
     if all_block_names:
         st.markdown("**Площади — нужны на МП и ЭП**")
         ui_v2.readonly(st, pd.DataFrame([{"Параметр":label,"Ед.":unit,**{n:_tep_get(n,k) for n in all_block_names}} for k,label,unit in AREA_PARAMS]), hide_index=True, width="stretch")
-        if res_block_names and not is_mp_stage:
+        if focus_block in res_block_names and not is_mp_stage:
             st.markdown("**Только ЭП — база статей A–E**")
-            ui_v2.render_ep_volumes(st, res_block_names, EP_ONLY_PARAMS + method_v2.EXTRA_PARAMS, _tep_get, _tep_set)
-        if res_block_names and is_mp_stage:
-            ui_v2.render_geometry(st, res_block_names)
-        elif res_block_names:
-            ui_v2.render_details(st, res_block_names)
+            show_all_volumes = st.checkbox("Показать все жилые УБ", key="all_volume_blocks")
+            volume_names = res_block_names if show_all_volumes else [focus_block]
+            ui_v2.render_ep_volumes(st, volume_names, EP_ONLY_PARAMS + method_v2.EXTRA_PARAMS, _tep_get, _tep_set)
+        if focus_block in res_block_names and is_mp_stage:
+            ui_v2.render_geometry(st, focus_block)
+        elif focus_block in res_block_names:
+            ui_v2.render_details(st, focus_block)
+        elif focus_block:
+            st.info("Для геометрии или фасада выберите жилой УБ.")
         st.caption(
             "Площади заполняются на вкладке «Блоки» и автоматически подставляются здесь. У паркинга используются коммерция, кладовые и "
             "площадь участка; остальные ячейки закрыты."
@@ -2803,12 +2871,12 @@ qty_by_basis, detail_cost_override, detail_rate_override, method_issues = ui_v2.
 )
 with sub_box:
     box_card = None
-    if not res_block_names:
-        st.info("Добавьте хотя бы один жилой блок.")
+    if focus_block not in res_block_names:
+        st.info("Для ставок A–E выберите жилой УБ.")
     else:
         ui_v2.legend(st)
         selected_block = ui_v2.render_rates(st, active_items, is_mp_stage, res_block_names,
-                                          qty_by_basis, detail_rate_override, GROUP_LABELS, fmt_mln)
+                                          qty_by_basis, detail_rate_override, GROUP_LABELS, fmt_mln, name=focus_block)
         box_card = st.container(border=True)
 
 with sub_park:
@@ -2821,6 +2889,7 @@ with sub_park:
         ),
     )
     if all_block_names:
+        show_all_parking = st.checkbox("Показать все УБ", key="all_parking_blocks")
         parking_rate_store = base_row_table(
             "smr_parking", SMR_PARKING_RATE_COLS, {c: f"_smr_parking_default_{c}" for c in SMR_PARKING_RATE_COLS},
             all_block_names, "parking_rate_editor",
@@ -2830,6 +2899,7 @@ with sub_park:
                 "Ставка СМР коммерции паркинга, руб/м2": "Коммерция паркинга, ₽/м²",
                 "Ставка СМР кладовых паркинга, руб/м2": "Кладовые паркинга, ₽/м²",
             },
+            visible_names=None if show_all_parking else [focus_block],
         )
     else:
         parking_rate_store = {}
@@ -2850,7 +2920,8 @@ with sub_gz:
     else:
         gz_row = st.columns([4, 1.3], vertical_alignment="bottom")
         with gz_row[0]:
-            gz_block = fixed_selector("Блок", all_block_names, "gz_block_selector")
+            gz_block = focus_block
+            st.caption(f"Урбан-блок · {gz_block}")
         with gz_row[1]:
             with st.popover("Копировать ставки в блок…", width="stretch"):
                 _gz_targets = st.multiselect(
@@ -2868,14 +2939,14 @@ with sub_gz:
         with gA:
             st.markdown("**G · площадь участка**")
             st.caption(f"База — площадь участка блока: {ui_v2.format_number(_plot)} га (из «Данных ЭП»)")
-            _ed, _changed = ui_v2.gz_editor(st, st.session_state.block_g_area[gz_block], f"g_area_editor_{gz_block}", qty=_plot)
+            _ed, _changed = ui_v2.gz_editor(st, st.session_state.block_g_area[gz_block], f"g_area_editor_{selected_id}", qty=_plot)
             if _changed:
                 st.session_state.block_g_area[gz_block] = _ed
                 st.rerun()
         with gB:
             st.markdown("**G · сети и кабели**")
             st.caption("Длины вводятся вручную")
-            _ed, _changed = ui_v2.gz_editor(st, st.session_state.block_g_length[gz_block], f"g_length_editor_{gz_block}")
+            _ed, _changed = ui_v2.gz_editor(st, st.session_state.block_g_length[gz_block], f"g_length_editor_{selected_id}")
             if _changed:
                 st.session_state.block_g_length[gz_block] = _ed
                 st.rerun()
@@ -2899,7 +2970,7 @@ with sub_gz:
                 else "СМР паркинга (м/м + коммерция + кладовые) + G"
             )
             st.caption(f"База блока = {_zbase_txt}")
-            _ed, _changed = ui_v2.gz_editor(st, st.session_state.block_z_pct[gz_block], f"z_pct_editor_{gz_block}", base=_z_preview, rate_col="Ставка, доля от СМР+G")
+            _ed, _changed = ui_v2.gz_editor(st, st.session_state.block_z_pct[gz_block], f"z_pct_editor_{selected_id}", base=_z_preview, rate_col="Ставка, доля от СМР+G")
             if _changed:
                 st.session_state.block_z_pct[gz_block] = _ed
                 st.rerun()
@@ -2908,7 +2979,7 @@ with sub_gz:
             st.caption("По объектам-аналогам")
             st.session_state.block_z_fixed[gz_block] = ui_v2.editor(st,
                 st.session_state.block_z_fixed[gz_block], width="stretch", num_rows="fixed",
-                hide_index=True, key=f"z_fixed_editor_{gz_block}",
+                hide_index=True, key=f"z_fixed_editor_{selected_id}",
                 disabled=["Код", "Статья затрат"],
                 column_config={"Сумма, руб": st.column_config.NumberColumn("🟨 Сумма · СЭО", min_value=0, format="localized")},
             )
@@ -3014,14 +3085,15 @@ with tab4:
             ),
         )
         if all_block_names:
-            selected_infra_block = fixed_selector("Блок", all_block_names, "infra_block_selector")
+            selected_infra_block = focus_block
+            st.caption(f"Урбан-блок · {selected_infra_block}")
             infra_hdr = st.empty()
             infra_edited = ui_v2.editor(st,
                 st.session_state.block_infra[selected_infra_block],
                 width="stretch",
                 num_rows="dynamic",
                 hide_index=True,
-                key=f"infra_editor_{selected_infra_block}",
+                key=f"infra_editor_{selected_id}",
                 column_config={
                     "Статья затрат": st.column_config.TextColumn(),
                     "Сумма, руб": st.column_config.NumberColumn(min_value=0, format="localized"),
@@ -3122,16 +3194,126 @@ parking_smr_scaled = np.where(is_res, underground_cost_raw, park_block_smr_raw) 
 # ======================================================================
 # 8. ЗАПОЛНЕНИЕ МЕСТ НА ЭКРАНЕ: KPI, карточки блоков, Итоги
 # ======================================================================
+def collect_calculation_issues():
+    issues = []
+    if not all_block_names:
+        issues.append(Issue(BLOCKS, "Добавьте хотя бы один урбан-блок."))
+    prefixes = sorted(all_block_names, key=len, reverse=True)
+    for message in method_issues:
+        name = next((block for block in prefixes if message.startswith(block + ": ")), "")
+        reason = message[len(name) + 2:] if name else message
+        if is_mp_stage:
+            issues.append(Issue(SMR, reason, name, VOLUMES))
+        elif reason.startswith("B20.10: заполните общую площадь"):
+            if qty_by_basis["B.20.10"][all_block_names.index(name)] <= 0:
+                issues.append(Issue(SMR, "B20.10 — введите общую площадь фасада.", name, VOLUMES))
+            if block_rate_series[name].get("B.20.10", 0) <= 0:
+                issues.append(Issue(SMR, "B20.10 — введите комплексную ставку.", name, RATES, "B"))
+        else:
+            issues.append(Issue(SMR, reason, name, RATES, "B"))
+
+    unit_labels = ["Квартиры", "Коммерция", "Кладовые", "Подземные м/м", "Наземные м/м"]
+    product_columns = [
+        "S квартир, м2", "S коммерции 1 эт., м2", "S кладовых, м2",
+        "Подземный паркинг, м/м", NAZEMNY_PARKING_COL,
+    ]
+    parking_columns = [product_columns[i] for i in (3, 4, 1, 2)]
+    parking_labels = [unit_labels[i] for i in (3, 4, 1, 2)]
+    for i, name in enumerate(all_block_names):
+        row = blocks.iloc[i]
+        kind = row["Тип блока"]
+        sale_pairs = [(column, rate, label) for column, rate, label in zip(product_columns, PRICE_COLS, unit_labels)
+                      if kind in _PRICE_APPLIES[rate]]
+        if not any(row[column] > 0 for column, _, _ in sale_pairs):
+            issues.append(Issue(BLOCKS, "Укажите продаваемую площадь или количество машино-мест.", name))
+        for column, rate, label in sale_pairs:
+            pair_issue(issues, name, row[column], row[rate], f"Цена продажи · {label}", PRICES,
+                       require_quantity=False)
+        for column, rate, label in zip(parking_columns, SMR_PARKING_RATE_COLS, parking_labels):
+            if kind in _PARK_APPLIES[rate]:
+                pair_issue(issues, name, row[column], row[rate], f"Ставка СМР паркинга · {label}",
+                           SMR, PARKING, require_quantity=False)
+
+        if is_res[i]:
+            geometry_code = "B.10" if is_mp_stage else "B.10.10"
+            if nsa[i] > 0 and geometry_code in qty_by_basis and qty_by_basis[geometry_code][i] <= 0:
+                label = "Заполните геометрию секций МП." if is_mp_stage else "Введите объём здания выше 0."
+                issues.append(Issue(SMR, label, name, VOLUMES))
+            rate_frame = st.session_state[active_store][name]
+            rates = block_rate_series[name]
+            excluded = set(rate_frame.loc[rate_frame["Применимость"] == "Не требуется", "Код"])
+            for code in item_codes_master:
+                if code not in ui_v2.DETAIL_CODES and code not in detail_cost_override and code not in excluded:
+                    pair_issue(issues, name, qty_by_basis[code][i], rates.get(code),
+                               f"{code} · {code_to_name[code]}", SMR, RATES, code_to_group[code], SMR, VOLUMES)
+
+        for _, article in st.session_state.block_g_length[name].iterrows():
+            pair_issue(issues, name, article["Кол-во"], article[method_v2.RATE],
+                       f"{article['Код']} · {article['Статья затрат']}", SMR, GZ,
+                       quantity_section=SMR, quantity_subsection=GZ)
+        area_rates = st.session_state.block_g_area[name][method_v2.RATE]
+        if plot_area_col[i] <= 0 and area_rates.gt(0).any():
+            issues.append(Issue(BLOCKS, "Укажите площадь участка для введённых ставок G.", name))
+        percentage_rates = st.session_state.block_z_pct[name]["Ставка, доля от СМР+G"]
+        if zg_base[i] <= 0 and percentage_rates.gt(0).any():
+            issues.append(Issue(SMR, "Заполните базу СМР + G для введённых процентных ставок Z.", name, GZ))
+        if row["Выручка"] > 0 and row["Прямые затраты"] <= 0:
+            issues.append(Issue(SMR, "Выручка рассчитана, прямые затраты равны нулю.", name,
+                                RATES if is_res[i] else PARKING))
+    if no_residential_warning:
+        issues.append(Issue(INDIRECT, "NSA проекта равно нулю. Пул косвенных затрат не распределён."))
+    return list(dict.fromkeys(issues))
+
+
+def open_issue(issue):
+    st.session_state["workflow_tab"] = issue.section
+    if issue.block in identities:
+        st.session_state["active_block_id"] = identities[issue.block]
+    if issue.subsection:
+        st.session_state["smr_tab"] = issue.subsection
+    if issue.group:
+        st.session_state[f"v3_group_{is_mp_stage}"] = issue.group
+    if issue.text.startswith("B20.10") and issue.subsection == RATES and issue.block:
+        st.session_state[f"facade_editor_{identities[issue.block]}"] = st.session_state.facade_modes[issue.block]
+
+
+calculation_issues = collect_calculation_issues()
+is_draft = bool(calculation_issues)
+calculation_status = (f"Черновик · требуется проверка ({len(calculation_issues)})"
+                      if is_draft else "Расчёт готов")
+with status_slot:
+    if is_draft:
+        st.warning(calculation_status)
+    else:
+        st.success(calculation_status)
+    save_status = st.empty()
 with kpi_slot:
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Выручка", fmt_mln(total_revenue))
     k2.metric("Полные затраты", fmt_mln(total_cost))
     k3.metric("Валовая прибыль", fmt_mln(total_profit))
-    k4.metric("Валовая рентабельность", f"{ui_v2.format_number(avg_margin * 100)} %")
+    margin = f"{ui_v2.format_number(avg_margin * 100)} %" if total_revenue > 0 else "—"
+    k4.metric("Валовая рентабельность", margin, help="При нулевой выручке рентабельность не определяется.")
+    if is_draft and total_revenue > 0:
+        k4.caption("Предварительная")
     k5.metric("NSA проекта", f"{fmt_money(total_nsa)} м²")
-    if no_residential_warning:
-        st.warning("NSA проекта = 0 — пул косвенных расходов не на что распределить, он не учтен в итогах.")
 
+with validation_slot:
+    if calculation_issues:
+        steps = [BLOCKS, PRICES, SMR, INDIRECT]
+        step_counts = {step: sum(issue.section == step for issue in calculation_issues) for step in steps}
+        st.caption(" · ".join(f"{step.split('. ', 1)[1]} — {count}" for step, count in step_counts.items()))
+        current = st.session_state.get("workflow_tab")
+        start = steps.index(current) + 1 if current in steps else 0
+        order = steps[start:] + steps[:start]
+        first_unfinished = min(calculation_issues, key=lambda issue: order.index(issue.section))
+        st.button("К следующему незаполненному разделу", key="next_missing",
+                  on_click=open_issue, args=(first_unfinished,))
+        with st.expander(f"Проверка исходных данных · {len(calculation_issues)}"):
+            for i, issue in enumerate(calculation_issues):
+                label = f"{issue.label} → {issue.subsection or issue.section}"
+                st.button(label, key=f"open_issue_{i}", on_click=open_issue, args=(issue,),
+                          type="tertiary")
 
 def _block_cost_lines(i: int) -> list:
     if is_res[i]:
@@ -3195,26 +3377,8 @@ if gz_strip is not None:
         s5.metric("Генподряд · в том числе Z", fmt_mln(zg_base[_gi] * float(st.session_state.block_z_pct[gz_block].set_index("Код")["Ставка, доля от СМР+G"].get("Z.10.10", 0.0)) * cost_factor))
 
 with tab5:
-    _missing = []
-    for _i, _name in enumerate(all_block_names):
-        if not is_res[_i]:
-            continue
-        _rate_frame = st.session_state[active_store][_name]
-        _rates = method_v2.effective_rates(_rate_frame)
-        _off = set(_rate_frame.loc[_rate_frame["Применимость"] == "Не требуется", "Код"])
-        for _c in item_codes_master:
-            if _c in ui_v2.DETAIL_CODES or _c in _off:
-                continue
-            _q, _r = qty_by_basis[_c][_i], method_v2.number(_rates.get(_c))
-            if _q > 0 and _r <= 0:
-                _missing.append(f"{_name} · {_c}: заполните ставку или подтвердите отсутствие работ")
-            elif _r > 0 and _q <= 0 :
-                _missing.append(f"{_name} · {_c}: заполните объём")
-    if method_issues or _missing:
-        st.warning("Расчёт неполный: есть незаполненные данные или замечания к объёмам.")
-        with st.expander("Проверка исходных данных"):
-            for _msg in method_issues + _missing:
-                st.write(_msg)
+    if is_draft:
+        st.warning("Расчёт предварительный. Перечень пропусков доступен в «Проверке исходных данных» над вкладками.")
     st.subheader(
         f"{project_name}, {project_city} — сценарий «{scenario_name}»",
         help="Валовая прибыль и валовая рентабельность. Налоги и кредиты не учитываются.",
@@ -4256,6 +4420,10 @@ def build_excel_report() -> bytes:
     ws_dash["B8"].font = Font(name=XL_FONT, size=10, color=report.MUTED_COLOR)
     ws_dash.merge_cells("B8:J8")
     ws_dash.row_dimensions[7].height = 24
+    ws_dash["B9"] = calculation_status
+    ws_dash["B9"].font = Font(name=XL_FONT, bold=True, color="972653" if is_draft else XL_GREEN)
+    ws_dash.merge_cells("B9:J9")
+    ws_dash.row_dimensions[9].height = 23
 
     FILL_TILE = PatternFill("solid", fgColor=XL_GREEN4)
     THICK_TOP = Side(style="medium", color=XL_GREEN)
@@ -4266,7 +4434,9 @@ def build_excel_report() -> bytes:
         ("Выручка, млн руб.", f"='{HELPER_SHEET_NAME}'!{COL['Выручка']}{total_row1}/1000000", report.NUMBER),
         ("Полные затраты, млн руб.", f"='{HELPER_SHEET_NAME}'!{COL['Полные затраты']}{total_row1}/1000000", report.NUMBER),
         ("Валовая прибыль, млн руб.", f"='{HELPER_SHEET_NAME}'!{COL['Валовая прибыль']}{total_row1}/1000000", report.NUMBER),
-        ("Валовая рентабельность", f"='{HELPER_SHEET_NAME}'!{COL['Валовая рентабельность']}{total_row1}", PERCENT_FMT),
+        ("Валовая рентабельность" + (" · предварительная" if is_draft else ""),
+         f"""=IF('{HELPER_SHEET_NAME}'!{COL["Выручка"]}{total_row1}>0,'{HELPER_SHEET_NAME}'!{COL["Валовая рентабельность"]}{total_row1},"—")""",
+         PERCENT_FMT),
         ("NSA проекта, м²", f"='{HELPER_SHEET_NAME}'!{COL['NSA, м2']}{total_row1}", report.NUMBER),
         ("Пул косвенных, млн руб. (база)", "='" + HELPER_SHEET_NAME + "'!H4/1000000", report.NUMBER),
     ]
@@ -4385,7 +4555,17 @@ def build_excel_report() -> bytes:
                         totals=report_totals, subheaders=report_sections)
     report.negative_values(ws_report, f"E{ROW_PROFIT}:{get_column_letter(n_cols_report)}{ROW_MARGIN}")
     wb.calculation.fullCalcOnLoad = True
-    desired_order = ["Дашборд", "Блоки", "Бюджет по статьям", "Элементы B20.10", "Косвенные", SHEET1_NAME, SHEET2_NAME, "ТЭП A–E", "Геометрия МП", "Детализация ЭП", "Источники ставок A–E", "G и Z — суммы статей", "Косвенные — состав", "Инфраструктура — состав", HELPER_SHEET_NAME]
+    if calculation_issues:
+        ws_checks = wb.create_sheet("Проверка исходных данных")
+        ws_checks.append(["Урбан-блок", "Раздел", "Подраздел", "Что проверить"])
+        for issue in calculation_issues:
+            ws_checks.append([issue.block, issue.section, issue.subsection, issue.text])
+        report.report_table(ws_checks, 1, ws_checks.max_row, 1, 4)
+        for column, width in zip("ABCD", (23, 31, 19, 80)):
+            ws_checks.column_dimensions[column].width = width
+        ws_checks.freeze_panes = "B2"
+        ws_dash["B9"] = calculation_status + " · см. «Проверка исходных данных»"
+    desired_order = ["Дашборд", "Проверка исходных данных", "Блоки", "Бюджет по статьям", "Элементы B20.10", "Косвенные", SHEET1_NAME, SHEET2_NAME, "ТЭП A–E", "Геометрия МП", "Детализация ЭП", "Источники ставок A–E", "G и Z — суммы статей", "Косвенные — состав", "Инфраструктура — состав", HELPER_SHEET_NAME]
     wb._sheets = [wb[name] for name in desired_order if name in wb.sheetnames]
     wb.active = 0
 
@@ -4396,14 +4576,19 @@ def build_excel_report() -> bytes:
 
 excel_bytes = build_excel_report()
 excel_slot.download_button(
-    label="Скачать Excel",
+    label="Скачать отчёт по экономике",
     data=excel_bytes,
-    file_name=f"financial_model_{scenario_name}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    icon=":material/download:",
-    width="stretch",
-    help="Дашборд, Экономика проекта, СМР по методике — живые формулы и графики",
+    file_name=f"{_slugify(project_name)}_{scenario_name}{'_черновик' if is_draft else ''}.xlsx",
+    mime=EXCEL_MIME, icon=":material/download:", width="stretch", on_click="ignore",
+    help="Итоги, бюджет по статьям и расшифровки затрат.",
 )
+archive_bytes = build_template_bytes(collect_template_data())
+for slot, key in ((archive_slot, "download_archive"), (reset_archive_slot, "download_before_reset")):
+    slot.download_button(
+        "Скачать архив для продолжения", data=archive_bytes,
+        file_name=f"{_slugify(project_name)}_архив.xlsx", mime=EXCEL_MIME, key=key,
+        icon=":material/download:", width="stretch", on_click="ignore",
+    )
 
 # ======================================================================
 # АВТОСОХРАНЕНИЕ ТЕКУЩЕГО СОСТОЯНИЯ (в конце каждого rerun)
@@ -4412,3 +4597,19 @@ _save_user, _save_project = current_user_and_project()
 _save_path = current_save_path()
 if _save_path is not None:
     autosave_write(_save_path, _save_user, _save_project)
+if not _save_path:
+    save_status.caption("Автосохранение выключено · укажите имя и название проекта или скачайте архив.")
+elif st.session_state.get("_save_write_error"):
+    save_status.error("Автосохранение не выполнено · скачайте архив.")
+elif STORAGE_MODE == "local":
+    save_status.caption("Сохранено на сервере · скачайте архив, чтобы защитить работу от перезапуска.")
+else:
+    writer = _get_ya_writer()
+    if writer.errors.get(_save_path):
+        save_status.error("Ошибка сохранения на Яндекс Диск · скачайте архив.")
+    elif writer.latest_text(_save_path):
+        save_status.caption("Автосохранение на Яндекс Диск · отправляется.")
+    elif _save_path in writer.last_ok:
+        save_status.caption("Сохранено на Яндекс Диск.")
+    else:
+        save_status.caption("Автосохранение на Яндекс Диск включено.")
