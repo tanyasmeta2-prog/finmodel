@@ -72,6 +72,13 @@ def refresh_ui_after_deploy():
 # Refresh the two UI modules when that process still holds the previous interface.
 if not hasattr(ui_v2, "format_number"):
     refresh_ui_after_deploy()
+@st.cache_resource
+def refresh_excel_import_after_deploy():
+    reload(sparse_excel)
+
+
+if not hasattr(sparse_excel, "LINKED_MARKER"):
+    refresh_excel_import_after_deploy()
 
 
 # ======================================================================
@@ -2344,7 +2351,7 @@ def _cb_import_template():
 
 @st.cache_data(show_spinner=False)
 def empty_sparse_template(names):
-    return sparse_excel.build_template(sparse_template_fields(), names)
+    return sparse_excel.build_template(sparse_template_fields(), tuple(names))
 
 
 # ======================================================================
@@ -2414,7 +2421,7 @@ with st.sidebar:
                 st.rerun()
 
     with st.expander("Данные из Excel", icon=":material/table_view:"):
-        st.caption("Шаблон заполняет только указанные ненулевые значения. Названия УБ связывают данные с текущим проектом.")
+        st.caption("Шаблон заполняет только указанные ненулевые значения. Названия УБ указываются на листе «ТЭП».")
         _input_blocks = st.session_state.get("blocks_df", generate_default_table())
         _input_names = tuple(_input_blocks["Название блока"].astype(str))
         st.download_button(

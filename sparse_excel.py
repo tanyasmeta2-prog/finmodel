@@ -1,6 +1,6 @@
 """Excel entry form and partial updates for the Streamlit model."""
 from collections import Counter
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from io import BytesIO
 from math import isfinite
@@ -8,15 +8,19 @@ from numbers import Real
 
 import pandas as pd
 from openpyxl import Workbook, load_workbook
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.workbook.defined_name import DefinedName
 
 from methodology_v2 import SECTION_COLS, DETAIL_COLS, DETAIL_SPEC, RATE
 from report_presentation import NUMBER, PERCENT, TITLE_COLOR, TEXT_COLOR, HEADER_COLOR, report_table
 
 SHEETS = ('ТЭП', 'Цены продаж', 'Объёмы', 'Ставки')
 MARKER = 'finmodel-sparse-input-v1'
+LINKED_MARKER = 'finmodel-sparse-input-v2'
+BLOCK_SLOTS = 30
 HEADER = 5
 FIRST_BLOCK = 5
 BLOCK_NAME = 'Название блока'
@@ -97,6 +101,55 @@ def _append_repeatable_tables(ws):
         validation.add(f'{column}{header + 1}:{column}{header + 12}')
 
 
+def link_block_headers(wb):
+    tep = wb['ТЭП']
+    last_col = max(FIRST_BLOCK + BLOCK_SLOTS - 1, tep.max_column)
+    last_letter = get_column_letter(last_col)
+    names_range = f'$E$5:${last_letter}$5'
+    wb.defined_names.add(DefinedName('UrbanBlockNames', attr_text=f"'ТЭП'!{names_range}"))
+    tep['C1'] = 'Количество УБ'
+    tep['C1'].font = Font(name='Arial', bold=True, color=TITLE_COLOR)
+    tep['D1'] = f'=SUMPRODUCT(--(LEN(TRIM({names_range}))>0))'
+    tep['D1'].font = Font(name='Arial', bold=True, color=TITLE_COLOR)
+    for name in SHEETS:
+        ws = wb[name]
+        ws['A1'] = LINKED_MARKER
+        ws['B3'] = (
+            f'Названия УБ вводятся только здесь, в строке 5. Подготовлено мест: {last_col - FIRST_BLOCK + 1}.'
+            if name == 'ТЭП' else 'Заголовки УБ подставляются с листа «ТЭП». Заполняйте данные под нужным УБ.'
+        )
+        matrix_end = HEADER
+        while ws.cell(matrix_end + 1, 1).value not in (None, ''):
+            matrix_end += 1
+        for col in range(FIRST_BLOCK, last_col + 1):
+            letter = get_column_letter(col)
+            ws.column_dimensions[letter].width = 23
+            for row in range(HEADER, matrix_end + 1):
+                ws.cell(row, col)._style = copy(ws.cell(row, FIRST_BLOCK)._style)
+            header = ws.cell(HEADER, col)
+            if name == 'ТЭП':
+                header.fill = PatternFill('solid', fgColor='FFF6D9')
+                header.number_format = '@'
+            else:
+                header.value = f"""=IF('ТЭП'!{letter}$5="","",'ТЭП'!{letter}$5)"""
+        ws.conditional_formatting.add(
+            f'E{HEADER + 1}:{last_letter}{matrix_end}',
+            FormulaRule(formula=['E$5=""'], fill=PatternFill('solid', fgColor='FFFFFF')),
+        )
+        for validation in ws.data_validations.dataValidation:
+            for area in list(validation.ranges.ranges):
+                if area.min_col == FIRST_BLOCK and HEADER < area.min_row <= matrix_end:
+                    validation.add(f'E{area.min_row}:{last_letter}{area.max_row}')
+        if name in ('Объёмы', 'Ставки'):
+            block_choice = DataValidation(type='list', formula1='UrbanBlockNames', allow_blank=True)
+            for row in range(matrix_end + 1, ws.max_row + 1):
+                if ws.cell(row, 1).value in ('mp-geometry', 'ep-elements'):
+                    block_choice.add(ws.cell(row, 2))
+            if block_choice.sqref:
+                ws.add_data_validation(block_choice)
+    return wb
+
+
 def build_template(fields, names):
     """Build the same empty form offered by the application and distributed separately."""
     wb = Workbook()
@@ -151,7 +204,7 @@ def build_template(fields, names):
         ws.sheet_view.showGridLines = False
         ws.sheet_view.zoomScale = 90
     output = BytesIO()
-    wb.save(output)
+    link_block_headers(wb).save(output)
     return output.getvalue()
 
 
@@ -161,7 +214,7 @@ def load_template(file_bytes):
         wb = load_workbook(BytesIO(file_bytes), data_only=True)
     except Exception:
         return None
-    return wb if any(sheet in wb and wb[sheet]['A1'].value == MARKER for sheet in SHEETS) else None
+    return wb if any(sheet in wb and wb[sheet]['A1'].value in (MARKER, LINKED_MARKER) for sheet in SHEETS) else None
 
 
 def _input_value(raw, field):
@@ -196,19 +249,27 @@ def _input_value(raw, field):
     return value or None
 
 
+def _block_columns(ws):
+    return {
+        cell.column: str(cell.value).strip()
+        for cell in ws[HEADER][FIRST_BLOCK - 1:] if cell.value is not None and str(cell.value).strip()
+    }
+
+
 def read_updates(wb, fields):
+    linked = any(name in wb and wb[name]['A1'].value == LINKED_MARKER for name in SHEETS)
+    if linked and ('ТЭП' not in wb or wb['ТЭП']['A1'].value != LINKED_MARKER):
+        return [], ['В новом шаблоне заголовки блоков берутся с листа «ТЭП». Восстановите этот лист.']
+    linked_columns = _block_columns(wb['ТЭП']) if linked else None
     updates, warnings = [], []
     block_order = {}
     for name in SHEETS:
-        if name not in wb or wb[name]['A1'].value != MARKER:
+        if name not in wb or wb[name]['A1'].value != (LINKED_MARKER if linked else MARKER):
             warnings.append(f'Лист «{name}» отсутствует или изменён, его данные пропущены.')
             continue
         ws = wb[name]
         catalog = {field.key: field for field in fields[name]}
-        columns = {
-            cell.column: str(cell.value).strip()
-            for cell in ws[HEADER][FIRST_BLOCK - 1:] if cell.value is not None and str(cell.value).strip()
-        }
+        columns = linked_columns if linked else _block_columns(ws)
         for block in columns.values():
             block_order.setdefault(block, len(block_order))
         duplicates = {block for block, count in Counter(columns.values()).items() if count > 1}
