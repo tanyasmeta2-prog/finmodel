@@ -232,4 +232,4 @@ def stage_workbook(wb, ws, ss, items, blocks, res_names, mp, helper, first_row, 
 
 
 # Current UI and calculation adapter agreed in the visual review.
-from review_v3 import prepare, legend, render_geometry, render_details, quantities, render_rates, editor, readonly, render_ep_volumes, add_review_report
+from review_v3 import prepare, legend, render_geometry, render_details, quantities, render_rates, editor, readonly, render_ep_volumes, add_review_report, format_number

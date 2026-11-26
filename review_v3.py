@@ -1,12 +1,16 @@
 """Agreed review changes: one input source, explicit facade modes and readable export."""
 from uuid import uuid4
 from copy import deepcopy
+import math
 import re
+from hashlib import blake2s
+from numbers import Real
 import numpy as np
 import pandas as pd
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter as xlcol
 from methodology_v2 import *
+from report_presentation import report_table, PERCENT
 
 STATUSES = ['Нет данных', 'Рассчитан', 'Не требуется']
 HEAT_KEY = 'ИТП / котельная, комплектов на этап'
@@ -79,38 +83,130 @@ def facade_cost(rows, area, rate, mode):
     return total,issues
 
 
-def _cfg(st,df,config,disabled,all_locked=False):
-    result=dict(config or {});off=set(disabled if isinstance(disabled,(list,tuple,set)) else [])
-    for c in df.columns:
-        conf=dict(result.get(c) or {})
-        label=conf.get('label') or str(c)
-        label=re.sub(r'^[✎🔒🟨🟦⬜\s]+','',label).replace(' · СЭО','').replace('СЭО · ','').replace(' · проект','')
-        locked=all_locked or disabled is True or c in off or conf.get('disabled') is True
-        conf['label']=('🔒 ' if locked else '✎ ')+label
-        result[c]=conf
+NUMBER_SEPARATORS = str.maketrans({',': ' ', '.': ','})
+NUMBER_INPUT = r'^[+-]?(?:(?:[0-9]+|[0-9]{1,3}(?:[ \u00a0\u202f][0-9]{3})+)(?:[,.][0-9]+)?|[,.][0-9]+)$'
+
+
+def format_number(value):
+    if pd.isna(value):
+        return '—'
+    return f'{value:,.2f}'.translate(NUMBER_SEPARATORS)
+
+
+def _column_config(frame, config, disabled=(), readonly=False):
+    result = dict(config or {})
+    locked_columns = set(disabled) if isinstance(disabled, (list, tuple, set)) else set()
+    for column in frame.columns:
+        if column in result and result[column] is None:
+            continue
+        settings = dict(result.get(column) or {})
+        label = settings.get('label') or str(column)
+        label = re.sub(r'^[✎🔒🟨🟦⬜\s]+', '', label).replace(' · СЭО', '').replace('СЭО · ', '').replace(' · проект', '')
+        locked = disabled is True or column in locked_columns or settings.get('disabled') is True
+        settings['label'] = label if readonly else ('🔒 ' if locked else '✎ ') + label
+        result[column] = settings
     return result
 
 
+def _numeric_formats(frame, config):
+    for column, settings in config.items():
+        if column not in frame or settings is None:
+            continue
+        type_config = settings.get('type_config') or {}
+        values = frame[column].dropna()
+        numeric = not values.empty and all(isinstance(value, Real) and not isinstance(value, (bool, np.bool_)) for value in values)
+        if type_config.get('type') == 'number' or (not type_config and numeric):
+            yield column, type_config
+
+
 def editor(st, data, **kwargs):
-    frame=data.data if hasattr(data,'data') and not isinstance(data,pd.DataFrame) else data
-    if not isinstance(frame,pd.DataFrame):return st.data_editor(data,**kwargs)
-    cfg=_cfg(st,frame,kwargs.pop('column_config',None),kwargs.get('disabled',[]))
-    key=str(kwargs.get('key','table'))
-    with st.container(key='manual_table_'+re.sub(r'\W','_',key)):
-        return st.data_editor(data,column_config=cfg,**kwargs)
+    if not isinstance(data, pd.DataFrame):
+        return st.data_editor(data, **kwargs)
+    config = _column_config(data, kwargs.pop('column_config', None), kwargs.get('disabled', []))
+    fields = dict(_numeric_formats(data, config))
+    view = data.copy()
+    for column in fields:
+        view[column] = pd.Series(
+            [None if pd.isna(value) else format_number(float(value)) for value in data[column]],
+            index=data.index, dtype="string",
+        )
+        settings = config[column]
+        settings['alignment'] = 'right'
+        settings['type_config'] = {
+            'type': 'text',
+            'validate': NUMBER_INPUT,
+        }
+    key = kwargs.get('key', 'table')
+    if fields:
+        # Refresh displayed precision after a committed edit, even if the grid keeps its edit state.
+        version = blake2s(repr(data.to_dict('split')).encode(), digest_size=8).hexdigest()
+        kwargs['key'] = f'{key}_{version}'
+    with st.container(key='manual_table_'+re.sub(r'\W','_',str(key))):
+        edited = st.data_editor(view, column_config=config, **kwargs)
+        for column, rules in fields.items():
+            lower, upper = rules.get('min_value'), rules.get('max_value')
+            parsed = []
+            for index, value in edited[column].items():
+                original = data.at[index, column] if index in data.index else None
+                shown = view.at[index, column] if index in view.index else None
+                if pd.isna(value) or value == '':
+                    parsed.append(original if pd.isna(shown) else None)
+                    continue
+                if value == shown:
+                    parsed.append(original)
+                    continue
+                value = value.strip()
+                raw = re.sub(r'[ \u00a0\u202f]', '', value).replace(',', '.')
+                entered = float(raw) if re.fullmatch(NUMBER_INPUT, value) else math.nan
+                if (not math.isfinite(entered) or (lower is not None and entered < lower)
+                        or (upper is not None and entered > upper)):
+                    st.warning(f'«{config[column]["label"][2:]}»: проверьте допустимый диапазон числа.')
+                    parsed.append(original)
+                else:
+                    parsed.append(entered)
+            dtype = data[column].dtype
+            series = pd.Series(parsed, index=edited.index, dtype=object)
+            if pd.api.types.is_numeric_dtype(dtype) and not pd.api.types.is_bool_dtype(dtype):
+                series = pd.to_numeric(series)
+                if pd.api.types.is_float_dtype(dtype) or (series.notna().all() and (series % 1 == 0).all()):
+                    series = series.astype(dtype)
+            edited[column] = series
+    return edited
 
 
-def readonly(st,data,**kwargs):
-    frame=data.data if hasattr(data,'data') and not isinstance(data,pd.DataFrame) else data
-    if isinstance(frame,pd.DataFrame):
-        kwargs['column_config']=_cfg(st,frame,kwargs.pop('column_config',None),[],True)
-        data=frame.style.set_properties(**{'background-color':'#F0F1F0'})
-    return st.dataframe(data,**kwargs)
+def readonly(st, data, *, percent_columns=(), **kwargs):
+    frame = data if isinstance(data, pd.DataFrame) else getattr(data, 'data', None)
+    if not isinstance(frame, pd.DataFrame):
+        return st.dataframe(data, **kwargs)
+    config = _column_config(frame, kwargs.pop('column_config', None), readonly=True)
+    numeric_columns = dict(_numeric_formats(frame, config))
+    formats = {}
+    for column in numeric_columns:
+        if column in percent_columns:
+            formats[column] = lambda value: format_number(value * 100) + ' %'
+        else:
+            formats[column] = format_number
+        config[column].pop('type_config', None)
+        config[column]['alignment'] = 'right'
+
+    def row_style(row):
+        total = any(isinstance(value, str) and value.strip().lower() == 'итого' for value in row)
+        styles = ['background-color: #eaf3e8; font-weight: bold' if total else
+                  'background-color: #f7f9f7' if row.name in alternate_rows else '' for _ in row]
+        for i, column in enumerate(row.index):
+            if column in ('Валовая прибыль', 'Валовая рентабельность') and pd.notna(row[column]) and row[column] < 0:
+                styles[i] += '; color: #9b3654'
+        return styles
+
+    alternate_rows = set(frame.index[1::2])
+    st.caption('Только просмотр')
+    styled = frame.style.format(formats, na_rep='—').apply(row_style, axis=1)
+    return st.dataframe(styled, column_config=config, **kwargs)
 
 
 def legend(st):
     st.markdown('<style>[class*="st-key-manual_table_"] {background:#fffbed;padding:0.65rem;border:1px solid #e2e3dc;border-radius:0.5rem;}</style>',unsafe_allow_html=True)
-    st.caption('✎ Редактируется · 🔒 Только просмотр. Таблица с ручным вводом — светло-жёлтая; без ручного ввода — серая.')
+    st.caption('✎ Поле для ввода · 🔒 Поле только для просмотра')
     if st.session_state.get('legacy_warnings'):
         with st.expander('Проверка переноса прежних данных'):
             for msg in st.session_state.legacy_warnings:st.warning(msg)
@@ -119,34 +215,50 @@ def legend(st):
 def render_geometry(st,names):
     name=st.selectbox('Блок — геометрия МП',names,key='mp_geometry_block')
     st.markdown('**Геометрия МП**')
-    st.caption('Секции одинаковой геометрии можно объединить количеством. Стилобат — отдельная строка. Сблокированные торцы исключаются один раз. Высота этажа — 3,0 м.')
+    st.info(
+        '**Фасад МП = Σ (количество × периметр × этажность × 3,00 м) − сблокированные торцы.**\n\n'
+        'Стилобат задаётся отдельно. Площади секций и стилобата не должны перекрываться. '
+        'Закрытые торцы исключаются один раз. Одинаковые секции можно объединить количеством.'
+    )
     old=st.session_state.mp_sections[name]
     edited=editor(st,old,key='mp_geometry_'+name,num_rows='dynamic',hide_index=True,width='stretch',column_config={c:st.column_config.NumberColumn(min_value=0) for c in SECTION_COLS[1:]})
     if not edited.equals(old):st.session_state.mp_sections[name]=edited;st.rerun()
     totals,issues=geometry(edited.to_dict('records'))
-    readonly(st,pd.DataFrame([totals]),hide_index=True,width='stretch')
+    labels = {
+        'MP_FOOTPRINT': 'Застройка, м²', 'MP_UNDERGROUND': 'Подземная часть, м²',
+        'MP_ABOVE': 'Надземная площадь, м²', 'MP_FACADE': 'Фасад, м²', 'MP_SECTIONS': 'Секции, шт',
+    }
+    readonly(st, pd.DataFrame([totals]).rename(columns=labels), hide_index=True, width='stretch')
     for issue in issues:st.error(issue)
 
 
 def render_ep_volumes(st,names,params,get,set_):
-    records=[]
-    for k,label,unit in params:
-        for name in names:
-            records.append({'Блок':name,'Параметр':label,'Ед.':st.session_state.thermal_kind[name]+', компл.' if k==HEAT_KEY else unit,'Объем':get(name,k)})
-    old=pd.DataFrame(records)
-    # A single mixed-unit table keeps ITP/boiler in the general volumes table.
-    options=list(dict.fromkeys([u for _,_,u in params if u!='компл.']+['ИТП, компл.','Котельная, компл.']))
-    ed=editor(st,old,key='ep_common_volumes_v3',hide_index=True,width='stretch',num_rows='fixed',disabled=['Блок','Параметр'],column_config={'Ед.':st.column_config.SelectboxColumn(options=options),'Объем':st.column_config.NumberColumn(min_value=0)})
-    changed=False
-    for i,(k,label,unit) in enumerate(params):
-        for j,name in enumerate(names):
-            row=ed.iloc[i*len(names)+j]
-            if k==HEAT_KEY:
-                selected='Котельная' if row['Ед.']=='Котельная, компл.' else 'ИТП'
-                if selected!=st.session_state.thermal_kind[name]:st.session_state.thermal_kind[name]=selected;changed=True
-            if number(row['Объем'])!=get(name,k):set_(name,k,number(row['Объем']));changed=True
-    if changed:st.rerun()
-    st.caption('Единица ИТП / котельной выбирается только в соответствующей строке. Для остальных параметров используется фиксированная единица.')
+    columns = {f'volume_{i}': name for i, name in enumerate(names)}
+    records = [
+        {'Параметр': label, 'Ед.': unit, **{col: get(name, key) for col, name in columns.items()}}
+        for key, label, unit in params
+    ]
+    config = {col: st.column_config.NumberColumn(name, min_value=0) for col, name in columns.items()}
+    edited = editor(
+        st, pd.DataFrame(records), key='ep_common_volumes', hide_index=True, width='stretch',
+        disabled=['Параметр', 'Ед.'], column_config=config,
+    )
+    for i, (key, _, _) in enumerate(params):
+        for column, name in columns.items():
+            value = number(edited.iloc[i][column])
+            if value != get(name, key):
+                set_(name, key, value)
+
+    st.markdown('**Ед. для строки «ИТП / котельная на этап»**')
+    slots = st.columns(min(len(names), 4))
+    options = ['ИТП', 'Котельная']
+    for i, name in enumerate(names):
+        current = st.session_state.thermal_kind[name]
+        selected = slots[i % len(slots)].selectbox(
+            name, options, index=options.index(current),
+            format_func=lambda kind: f'{kind}, компл.', key=f'ep_thermal_kind_{name}_{current}',
+        )
+        st.session_state.thermal_kind[name] = selected
 
 
 def render_details(st,names):
@@ -251,22 +363,21 @@ def render_rates(st,items,mp,names,qty,override_rates,group_labels,fmt_mln):
 
 def add_review_report(wb,ss,blocks,items,mp,item_costs,qty,factor,helper,colmap,first_row,leaf_formula,g_area,g_length,z_pct,z_fixed):
     """Reader layouts over the actual model. Never creates demonstration inputs."""
-    gray=PatternFill('solid',fgColor='F0F1F0');head=PatternFill('solid',fgColor='E3E6E2');totalfill=PatternFill('solid',fgColor='E4EDE0')
     names=list(blocks['Название блока']);res=list(ss.block_rates)
     factor_ref=f"'{helper}'!$E$4"
-    money='#,##0;[Red](#,##0);"—"'
-    def init(name,headers):
-        ws=wb.create_sheet(name);ws.sheet_view.showGridLines=False;ws.append([name]);ws.append(['Проектные данные · '+('МП' if mp else 'ЭП')]);ws.append([]);ws.append([]);ws.append(headers)
-        for c in ws[5]:c.fill=head;c.font=Font(name='Arial',bold=True,color='344434');c.alignment=Alignment(wrap_text=True,vertical='center')
-        ws.row_dimensions[5].height=42;ws.freeze_panes='D6';return ws
-    def finish(ws):
-        for row in ws.iter_rows(min_row=6):
-            for c in row:
-                if c.value is not None:
-                    c.fill=gray;c.font=Font(name='Arial',size=11);c.alignment=Alignment(vertical='center',wrap_text=True);c.number_format=money if isinstance(c.value,(int,float)) or c.data_type=='f' else 'General'
-            ws.row_dimensions[row[0].row].height=32
-        for i in range(1,ws.max_column+1):ws.column_dimensions[xlcol(i)].width=22
-        if ws.max_column>=2:ws.column_dimensions['B'].width=38
+    def init(name, headers):
+        ws = wb.create_sheet(name)
+        for col, label in enumerate(headers, 1):
+            ws.cell(5, col, label)
+        ws.freeze_panes = 'D6'
+        return ws
+
+    def finish(ws, *, totals=(), gutters=()):
+        report_table(ws, 5, ws.max_row, 1, ws.max_column, totals=totals, gutters=gutters)
+        for i in range(1, ws.max_column + 1):
+            ws.column_dimensions[xlcol(i)].width = 22
+        ws.column_dimensions['B'].width = 38
+
     fac=init('Элементы B20.10',['🔒 Блок','🔒 Код','🔒 Элемент','🔒 Тип','🔒 Уточнение','🔒 Ед.','🔒 Объём','🔒 Ставка, руб./ед.','🔒 Статус','🔒 Сумма без сценария, руб','🔒 Со сценарием, руб'])
     facade_parent={};detail_source={}
     for name in names:
@@ -289,10 +400,8 @@ def add_review_report(wb,ss,blocks,items,mp,item_costs,qty,factor,helper,colmap,
         fac.cell(parent,10,f'=SUM(J{start}:J{end})' if mode=='Детальный' and end>=start else f'=G{parent}*H{parent}')
         if end>=start:
             fac.row_dimensions.group(start,end,hidden=True);fac.row_dimensions[parent].collapsed=True
-    finish(fac);fac.column_dimensions['C'].width=38;fac.column_dimensions['E'].width=38
+    finish(fac, totals=set(facade_parent.values()));fac.column_dimensions['C'].width=38;fac.column_dimensions['E'].width=38
     fac.sheet_properties.outlinePr.summaryBelow=False
-    for parent in facade_parent.values():
-        for c in fac[parent]:c.fill=totalfill;c.font=Font(name='Arial',bold=True)
     # Keep the existing formula engine linked to the same exact per-element calculation.
     det=wb['Детализация ЭП'];counters={}
     for r in range(2,det.max_row+1):
@@ -335,15 +444,12 @@ def add_review_report(wb,ss,blocks,items,mp,item_costs,qty,factor,helper,colmap,
                 rate=(number(block['Прямые затраты'])-number(block['Наружные работы блока (G), руб'])-number(block['Прочие затраты блока (Z), руб'])-number(block['Инфраструктура блока (Z5010), руб'])-number(block['Себестоимость коробки (методика)']))/factor
                 amount=f'={xlcol(start+2)}{row}*{factor_ref}'
             for j,value in enumerate([u,volume,rate,comment,amount]):budget.cell(row,start+j,value)
-            if kind=='Z_PCT':budget.cell(row,start+2).number_format='0.0%'
+            if kind=='Z_PCT':budget.cell(row,start+2).number_format=PERCENT
     last_article=budget.max_row
     total_row=last_article+1;budget.cell(total_row,2,'ИТОГО прямые затраты')
     for i in range(len(names)):
         c=9+i*6;budget.cell(total_row,c,f'=SUM({xlcol(c)}6:{xlcol(c)}{last_article})')
-    finish(budget)
-    for row in budget.iter_rows(min_row=6):
-        if row[2].value=='Z' and row[0].value in [x[0] for x in z_pct]:
-            for i in range(len(names)):budget.cell(row[0].row,7+i*6).number_format='0.0%'
+    finish(budget, totals={total_row}, gutters={4 + i * 6 for i in range(len(names) + 1)})
     for i,name in enumerate(names):
         start=5+i*6;last=start+4;budget.column_dimensions.group(xlcol(start),xlcol(last-1),hidden=True);budget.column_dimensions[xlcol(last)].collapsed=True
         budget.column_dimensions[xlcol(last+1)].width=3
@@ -367,15 +473,6 @@ def add_review_report(wb,ss,blocks,items,mp,item_costs,qty,factor,helper,colmap,
             for c in range(6,7+len(names)):ind.cell(parent,c,f'=SUM({xlcol(c)}{start}:{xlcol(c)}{end})')
             ind.row_dimensions.group(start,end,hidden=True);ind.row_dimensions[parent].collapsed=True
         else:ind.cell(parent,6,0)
-    finish(ind);ind.sheet_properties.outlinePr.summaryBelow=False
-    # All current report tables are read-only snapshots/formula views, without role colors.
-    for ws in wb:
-        if ws.title in ['Дашборд']:continue
-        ws.sheet_view.showGridLines=False
-        for row in ws:
-            for c in row:
-                if c.value is not None and c.row>=5 and c.fill.fgColor.rgb in ['00FFF2CC','00DDEBF7','FFF2CC','DDEBF7']:
-                    c.fill=gray
-                if c.comment and ('СЭО' in c.comment.text or 'Проект' in c.comment.text):c.comment=None
+    finish(ind, totals=set(parents));ind.sheet_properties.outlinePr.summaryBelow=False
     for name in ['ТЭП A–E','Геометрия МП','Детализация ЭП','Источники ставок A–E','СМР по методике']:
         if name in wb:wb[name].sheet_state='hidden'

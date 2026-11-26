@@ -46,6 +46,7 @@ import requests
 import streamlit as st
 import methodology_v2 as method_v2
 import version2_ui as ui_v2
+import report_presentation as report
 from PIL import Image as PILImage
 
 from openpyxl import Workbook
@@ -1306,11 +1307,11 @@ def _num(x) -> float:
 
 
 def fmt_money(v: float) -> str:
-    return f"{v:,.0f}".replace(",", " ")
+    return ui_v2.format_number(v)
 
 
 def fmt_mln(v: float, unit: bool = True) -> str:
-    s = f"{v / 1e6:,.1f}".replace(",", " ").replace(".", ",")
+    s = ui_v2.format_number(v / 1e6)
     return f"{s} млн ₽" if unit else s
 
 
@@ -2352,7 +2353,7 @@ with st.sidebar:
 # ======================================================================
 # 5. ШАПКА (на всех вкладках): проект, город, стадия, сценарий, Excel + KPI
 # ======================================================================
-st.caption("Версия 2 · обновление 26.11.2026 · МП / ЭП · A–E")
+st.caption("Версия 2 · 26.11.2026 · МП / ЭП · обновлённая выгрузка")
 h1, h2, h3, h4, h5 = st.columns([3, 1.3, 1.1, 1.4, 1.5], vertical_alignment="bottom")
 with h1:
     project_name = st.text_input("Проект", key="project_name_input")
@@ -2753,7 +2754,7 @@ with sub_gz:
         gA, gB = st.columns(2, gap="medium")
         with gA:
             st.markdown("**G · площадь участка**")
-            st.caption(f"База — площадь участка блока: {_plot:.2f} га (из «Данных ЭП»)".replace(".", ","))
+            st.caption(f"База — площадь участка блока: {ui_v2.format_number(_plot)} га (из «Данных ЭП»)")
             _ed, _changed = ui_v2.gz_editor(st, st.session_state.block_g_area[gz_block], f"g_area_editor_{gz_block}", qty=_plot)
             if _changed:
                 st.session_state.block_g_area[gz_block] = _ed
@@ -3013,7 +3014,7 @@ with kpi_slot:
     k1.metric("Выручка", fmt_mln(total_revenue))
     k2.metric("Полные затраты", fmt_mln(total_cost))
     k3.metric("Валовая прибыль", fmt_mln(total_profit))
-    k4.metric("Валовая рентабельность", f"{avg_margin * 100:.1f} %".replace(".", ","))
+    k4.metric("Валовая рентабельность", f"{ui_v2.format_number(avg_margin * 100)} %")
     k5.metric("NSA проекта", f"{fmt_money(total_nsa)} м²")
     if no_residential_warning:
         st.warning("NSA проекта = 0 — пул косвенных расходов не на что распределить, он не учтен в итогах.")
@@ -3113,31 +3114,15 @@ with tab5:
     _money_cols = ["Прямые затраты", "Аллоцированные затраты", "Полные затраты", "Выручка", "Валовая прибыль"]
     _res_view = blocks[tbl_cols].copy()
     _res_view["Тип блока"] = np.where(is_res, "Жилой", "Паркинг")
-    _res_view["NSA, м2"] = _res_view["NSA, м2"].round(0)
     for _c in _money_cols:
         _res_view[_c] = _res_view[_c] / 1e6
-    _tot = {"Название блока": "Итого", "Тип блока": "", "NSA, м2": round(total_nsa),
+    _tot = {"Название блока": "Итого", "Тип блока": "", "NSA, м2": total_nsa,
             "Доля аллокации": 1.0 if total_nsa > 0 else 0.0,
             **{_c: _res_view[_c].sum() for _c in _money_cols}, "Валовая рентабельность": avg_margin}
     _res_view = pd.concat([_res_view, pd.DataFrame([_tot])], ignore_index=True)
-    def _ru(v, d=1):
-        return f"{v:,.{d}f}".replace(",", " ").replace(".", ",")
-
-    _last = len(_res_view) - 1
-    _styler = (
-        _res_view.style
-        .format({
-            "NSA, м2": lambda v: _ru(v, 0),
-            "Доля аллокации": lambda v: _ru(v * 100, 1) + " %",
-            "Валовая рентабельность": lambda v: _ru(v * 100, 1) + " %",
-            **{_c: (lambda v: _ru(v, 1)) for _c in _money_cols},
-        })
-        .apply(lambda r: ["background-color: #EEF7EC; color: #2E7D27" if r.name == _last else "" for _ in r], axis=1)
-        .map(lambda v: "color: #AE4B67" if isinstance(v, (int, float)) and v < 0 else "",
-             subset=["Валовая прибыль", "Валовая рентабельность"])
-    )
     ui_v2.readonly(st,
-        _styler, width="stretch", hide_index=True,
+        _res_view, width="stretch", hide_index=True,
+        percent_columns=("Доля аллокации", "Валовая рентабельность"),
         column_config={
             "Название блока": st.column_config.TextColumn("Блок"),
             "Тип блока": st.column_config.TextColumn("Тип"),
@@ -3151,21 +3136,23 @@ with tab5:
             "Валовая прибыль": st.column_config.NumberColumn("Вал. прибыль, млн ₽"),
         },
     )
-    _chart_layout = dict(template="plotly_white+talan", plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF", height=300, margin=dict(t=48, b=24, l=8, r=8),
+    _chart_layout = dict(template="plotly_white+talan", plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF", height=300, margin=dict(t=48, b=24, l=8, r=8), separators=", ", yaxis=dict(tickformat=",.2f"),
                          legend=dict(orientation="h", yanchor="top", y=-0.12, xanchor="left", x=0))
     c1, c2 = st.columns(2)
     with c1:
         fig_rev_cost = go.Figure()
         fig_rev_cost.add_bar(name="Выручка", x=blocks["Название блока"], y=blocks["Выручка"] / 1e6, marker_color=f"#{COLOR_REVENUE}")
         fig_rev_cost.add_bar(name="Полные затраты", x=blocks["Название блока"], y=blocks["Полные затраты"] / 1e6, marker_color=f"#{COLOR_COST}")
+        fig_rev_cost.update_traces(hovertemplate="%{x}<br>%{y:,.2f} млн руб.<extra>%{fullData.name}</extra>")
         fig_rev_cost.update_layout(title="Выручка и затраты по блокам, млн ₽", barmode="group", **_chart_layout)
         st.plotly_chart(fig_rev_cost, width="stretch", theme=None)
     with c2:
         margin_colors = [f"#{COLOR_POSITIVE}" if v >= 0 else f"#{COLOR_NEGATIVE}" for v in blocks["Валовая рентабельность"]]
         fig_margin = go.Figure(go.Bar(
             x=blocks["Название блока"], y=blocks["Валовая рентабельность"] * 100, marker_color=margin_colors,
-            text=[f"{v * 100:.1f} %".replace(".", ",") for v in blocks["Валовая рентабельность"]], textposition="outside",
+            text=[f"{ui_v2.format_number(v * 100)} %" for v in blocks["Валовая рентабельность"]], textposition="outside",
         ))
+        fig_margin.update_traces(hovertemplate="%{x}<br>%{y:,.2f} %<extra></extra>")
         fig_margin.update_layout(title="Валовая рентабельность по блокам, %", yaxis_title="%", **_chart_layout)
         fig_margin.add_hline(y=0, line_color="#898781", line_width=1)
         st.plotly_chart(fig_margin, width="stretch", theme=None)
@@ -3175,10 +3162,10 @@ with tab5:
         fig = go.Figure()
         for (lbl, v), col in zip(parts.items(), colors):
             pct = (v / total * 100) if total > 0 else 0.0
-            fig.add_bar(name=f"{lbl} {pct:.0f}%", x=[pct], y=[""], orientation="h", marker_color=f"#{col}",
-                        hovertemplate=f"{lbl}: {fmt_money(v)} ₽ ({pct:.1f}%)<extra></extra>")
+            fig.add_bar(name=f"{lbl} {ui_v2.format_number(pct)} %", x=[pct], y=[""], orientation="h", marker_color=f"#{col}",
+                        hovertemplate=f"{lbl}: {fmt_money(v)} ₽ ({ui_v2.format_number(pct)} %)<extra></extra>")
         fig.update_layout(template="plotly_white+talan", plot_bgcolor="#FFFFFF", paper_bgcolor="#FFFFFF", title=title, barmode="stack", height=190, margin=dict(t=48, b=8, l=8, r=8),
-                          xaxis=dict(range=[0, 100], ticksuffix="%"),
+                          xaxis=dict(range=[0, 100], ticksuffix=" %", tickformat=",.2f"), separators=", ",
                           legend=dict(orientation="h", yanchor="top", y=-0.25, xanchor="left", x=0))
         return fig
 
@@ -3222,9 +3209,9 @@ TOTAL_FONT = Font(name=XL_FONT, bold=True, color=XL_TEXT)
 ZEBRA_FILL = PatternFill(start_color=XL_GREEN4, end_color=XL_GREEN4, fill_type="solid")
 WHITE_FILL = PatternFill(start_color=XL_WHITE, end_color=XL_WHITE, fill_type="solid")
 DATA_FONT = Font(name=XL_FONT, size=10, color=XL_TEXT)
-MONEY_FMT = "#,##0"
-PERCENT_FMT = "0.0%"
-MONEY_MM_FMT = '#,##0.0,, "млн ₽"'
+MONEY_FMT = report.NUMBER
+PERCENT_FMT = report.PERCENT
+MONEY_MM_FMT = '#,##0.00,, "млн руб."'
 
 
 def zebra(i: int) -> PatternFill:
@@ -3284,6 +3271,8 @@ def build_excel_report() -> bytes:
     Лист 1 ссылается на Лист 2 для себестоимости коробки жилых блоков —
     изменение ставок в каталоге (Лист 2) пересчитывает весь отчет."""
     wb = Workbook()
+    report_context = f"{project_name} · {project_city} · {'МП' if is_mp_stage else 'ЭП'} · {scenario_name}"
+    detail_first = report.DETAIL_HEADER + 1
     ws1 = wb.active
     ws1.title = HELPER_SHEET_NAME
 
@@ -3580,7 +3569,7 @@ def build_excel_report() -> bytes:
     # общие на весь участок). G и Z теперь считаются по блокам (Лист 2) и
     # входят напрямую в прямые затраты каждого блока, а не в этот пул.
     ws_indirect = wb.create_sheet("Косвенные — состав")
-    ws_indirect.append(["Раздел", "Статья", "Сумма, руб", "Со сценарием, руб"])
+    report.report_heading(ws_indirect, report_context, ["Раздел", "Статья", "Сумма, руб.", "Со сценарием, руб."])
     _ind_rows = {}
     for _key, _label in TPL_INDIRECT_SECTIONS.items():
         _ind_rows[_key] = []
@@ -3589,11 +3578,7 @@ def build_excel_report() -> bytes:
             _ri = ws_indirect.max_row + 1
             ws_indirect.append([_label, _r.get("Наименование", _label), _xl_num(_r.get("Сумма, руб")), f"=C{_ri}*'{HELPER_SHEET_NAME}'!$E$4"])
             _ind_rows[_key].append(_ri)
-    ui_v2.style_input_sheet(ws_indirect, seo=True)
-    for _row in ws_indirect.iter_rows(min_row=2):
-        _row[2].fill = ui_v2.YELLOW
-        _row[3].fill = ui_v2.GRAY
-    ws1["H4"] = f"=SUM('Косвенные — состав'!C2:C{max(2,ws_indirect.max_row)})"
+    ws1["H4"] = f"=SUM('Косвенные — состав'!C{detail_first}:C{max(detail_first, ws_indirect.max_row)})"
     ws1["H4"].number_format = MONEY_FMT
 
     # ------------------------------------------------------------------
@@ -3618,8 +3603,8 @@ def build_excel_report() -> bytes:
         # Инфраструктура блока (Z.50.10, Вкладка 4) — детализация по статьям
         # не выгружается (только итог по блоку), поэтому пишется как значение,
         # а не как формула со ссылкой на отдельный лист-каталог.
-        _infra_last = max(2, 1 + sum(len(st.session_state.block_infra.get(_n, EMPTY_INFRA_DF)) for _n in all_block_names))
-        f_infra = f"=SUMIF('Инфраструктура — состав'!$A$2:$A${_infra_last},A{r1},'Инфраструктура — состав'!$D$2:$D${_infra_last})"
+        _infra_last = max(detail_first, report.DETAIL_HEADER + sum(len(st.session_state.block_infra.get(_n, EMPTY_INFRA_DF)) for _n in all_block_names))
+        f_infra = f"=SUMIF('Инфраструктура — состав'!$A${detail_first}:$A${_infra_last},A{r1},'Инфраструктура — состав'!$D${detail_first}:$D${_infra_last})"
         f_direct = (
             f'=IF({c["Тип блока"]}{r1}="{TYPE_RESIDENTIAL}",'
             f'{c["Себестоимость коробки (методика)"]}{r1}+{c["Наружные работы блока (G), руб"]}{r1}'
@@ -4141,7 +4126,7 @@ def build_excel_report() -> bytes:
     # ------------------------------------------------------------------
     ws_dash = wb.create_sheet("Дашборд", 0)
     ws_dash.sheet_view.showGridLines = False
-    for col, w in {"A": 3, "B": 23, "C": 23, "D": 23, "E": 23, "F": 23, "G": 23, "H": 3}.items():
+    for col, w in {"A": 3, "B": 25, "C": 18, "D": 21, "E": 21, "F": 21, "G": 21, "H": 21, "I": 21, "J": 21}.items():
         ws_dash.column_dimensions[col].width = w
 
     logo_dash = XLImage(PILImage.open(BytesIO(logo_bytes)))
@@ -4151,14 +4136,12 @@ def build_excel_report() -> bytes:
     for r in range(2, 6):
         ws_dash.row_dimensions[r].height = 20
 
-    ws_dash["B7"] = f'="Финансовая модель — "&\'{HELPER_SHEET_NAME}\'!A1'
-    ws_dash["B7"].font = Font(name=XL_FONT, size=16, bold=True, color=XL_TEXT)
-    ws_dash.merge_cells("B7:G7")
-    ws_dash["B8"] = (
-        f'="Город: "&SUBSTITUTE(\'{HELPER_SHEET_NAME}\'!A2,"Город: ","")&"   |   "&\'{HELPER_SHEET_NAME}\'!A3'
-    )
-    ws_dash["B8"].font = Font(name=XL_FONT, size=11, color=XL_TEXT2)
-    ws_dash.merge_cells("B8:G8")
+    ws_dash["B7"] = "Дашборд финансовой модели"
+    report.title(ws_dash["B7"])
+    ws_dash.merge_cells("B7:J7")
+    ws_dash["B8"] = report_context
+    ws_dash["B8"].font = Font(name=XL_FONT, size=10, color=report.MUTED_COLOR)
+    ws_dash.merge_cells("B8:J8")
     ws_dash.row_dimensions[7].height = 24
 
     FILL_TILE = PatternFill("solid", fgColor=XL_GREEN4)
@@ -4167,12 +4150,12 @@ def build_excel_report() -> bytes:
     kpi_row = 10
     tile_h = 4
     tiles = [
-        ("Выручка", f"='{HELPER_SHEET_NAME}'!{COL['Выручка']}{total_row1}", MONEY_MM_FMT),
-        ("Полные затраты", f"='{HELPER_SHEET_NAME}'!{COL['Полные затраты']}{total_row1}", MONEY_MM_FMT),
-        ("Валовая прибыль", f"='{HELPER_SHEET_NAME}'!{COL['Валовая прибыль']}{total_row1}", MONEY_MM_FMT),
+        ("Выручка, млн руб.", f"='{HELPER_SHEET_NAME}'!{COL['Выручка']}{total_row1}/1000000", report.NUMBER),
+        ("Полные затраты, млн руб.", f"='{HELPER_SHEET_NAME}'!{COL['Полные затраты']}{total_row1}/1000000", report.NUMBER),
+        ("Валовая прибыль, млн руб.", f"='{HELPER_SHEET_NAME}'!{COL['Валовая прибыль']}{total_row1}/1000000", report.NUMBER),
         ("Валовая рентабельность", f"='{HELPER_SHEET_NAME}'!{COL['Валовая рентабельность']}{total_row1}", PERCENT_FMT),
-        ("NSA проекта, м2", f"='{HELPER_SHEET_NAME}'!{COL['NSA, м2']}{total_row1}", '#,##0 "м²"'),
-        ("Пул косвенных, база", "='" + HELPER_SHEET_NAME + "'!H4", MONEY_MM_FMT),
+        ("NSA проекта, м²", f"='{HELPER_SHEET_NAME}'!{COL['NSA, м2']}{total_row1}", report.NUMBER),
+        ("Пул косвенных, млн руб. (база)", "='" + HELPER_SHEET_NAME + "'!H4/1000000", report.NUMBER),
     ]
     dash_cols = ["B", "C", "D", "E", "F", "G"]
     for col, (label, formula, fmt) in zip(dash_cols, tiles):
@@ -4193,109 +4176,41 @@ def build_excel_report() -> bytes:
         val_cell = ws_dash[f"{col}{val_row}"]
         val_cell.value = formula
         val_cell.number_format = fmt
-        val_cell.font = Font(name=XL_FONT, size=15, bold=True, color=XL_GREEN if fmt != PERCENT_FMT else XL_BORDO)
+        val_cell.font = Font(name=XL_FONT, size=15, bold=True, color=report.TITLE_COLOR)
         val_cell.alignment = Alignment(horizontal="left", vertical="bottom", indent=1)
     for r in range(kpi_row, kpi_row + tile_h):
         ws_dash.row_dimensions[r].height = 16
 
-    chart_top = kpi_row + tile_h + 2
+    def helper_total(field):
+        return f"'{HELPER_SHEET_NAME}'!{COL[field]}{total_row1}"
 
-    # --- диаграмма 1: выручка / затраты / прибыль по блокам ---
-    ws_dash[f"B{chart_top}"] = "Выручка, затраты и прибыль по блокам"
-    ws_dash[f"B{chart_top}"].font = Font(name=XL_FONT, size=12, bold=True, color=XL_GREEN)
-
-    if N_ROWS > 0:
-        dash_bar = BarChart()
-        dash_bar.type = "col"
-        dash_bar.grouping = "clustered"
-        dash_bar.style = 2
-        dash_bar.y_axis.numFmt = MONEY_MM_FMT
-        dash_bar.height, dash_bar.width = 8.5, 17
-        dash_cats = Reference(ws1, min_col=1, min_row=first_row1, max_row=last_row1)
-        dash_data_cost = Reference(ws1, min_col=EXCEL_HEADERS.index("Полные затраты") + 1,
-                                    min_row=header_row1, max_row=last_row1)
-        dash_data_rev = Reference(ws1, min_col=EXCEL_HEADERS.index("Выручка") + 1,
-                                   min_row=header_row1, max_row=last_row1)
-        dash_data_profit = Reference(ws1, min_col=EXCEL_HEADERS.index("Валовая прибыль") + 1,
-                                      min_row=header_row1, max_row=last_row1)
-        dash_bar.add_data(dash_data_cost, titles_from_data=True)
-        dash_bar.add_data(dash_data_rev, titles_from_data=True)
-        dash_bar.add_data(dash_data_profit, titles_from_data=True)
-        dash_bar.set_categories(dash_cats)
-        dash_bar.series[0].graphicalProperties.solidFill = XL_GRAY
-        dash_bar.series[1].graphicalProperties.solidFill = XL_GREEN
-        dash_bar.series[2].graphicalProperties.solidFill = XL_BORDO
-        dash_bar.legend.position = "b"
-        ws_dash.add_chart(dash_bar, f"B{chart_top + 1}")
-
-    # --- диаграмма 2: структура полных затрат проекта ---
-    struct_row = chart_top + 1
-    ws_dash[f"F{chart_top}"] = "Структура полных затрат"
-    ws_dash[f"F{chart_top}"].font = Font(name=XL_FONT, size=12, bold=True, color=XL_GREEN)
-    cost_labels = ["Косвенные (пул)", "Коробка (методика)", "Наружные работы (G)", "Прочие СМР (Z)", "Паркинги"]
-    ws_dash[f"F{struct_row}"] = "Статья"
-    ws_dash[f"G{struct_row}"] = "Сумма, руб"
-    for i, lbl in enumerate(cost_labels):
-        ws_dash[f"F{struct_row + 1 + i}"] = lbl
-    for r in range(struct_row, struct_row + 1 + len(cost_labels)):
-        ws_dash[f"F{r}"].font = Font(name=XL_FONT, size=10, color=XL_TEXT)
-        ws_dash[f"G{r}"].font = Font(name=XL_FONT, size=10, color=XL_TEXT)
-
-    if N_ROWS > 0:
-        rng_park_u = f"'{HELPER_SHEET_NAME}'!${COL['Подземный паркинг, м/м']}${first_row1}:${COL['Подземный паркинг, м/м']}${last_row1}"
-        rng_park_u_rate = f"'{HELPER_SHEET_NAME}'!${COL['Ставка СМР подземного м/м, руб']}${first_row1}:${COL['Ставка СМР подземного м/м, руб']}${last_row1}"
-        rng_park_g = f"'{HELPER_SHEET_NAME}'!${COL['Наземный/Многоуровневый паркинг, м/м']}${first_row1}:${COL['Наземный/Многоуровневый паркинг, м/м']}${last_row1}"
-        rng_park_g_rate = f"'{HELPER_SHEET_NAME}'!${COL['Ставка СМР наземного м/м, руб']}${first_row1}:${COL['Ставка СМР наземного м/м, руб']}${last_row1}"
-        _hs = f"'{HELPER_SHEET_NAME}'!"
-        _rng = lambda col: f"{_hs}${COL[col]}${first_row1}:${COL[col]}${last_row1}"
-        _rng_type = _rng("Тип блока")
-        parking_total_formula = (
-            f'=(SUMPRODUCT(({_rng_type}="{TYPE_RESIDENTIAL}")*{rng_park_u}*{rng_park_u_rate})'
-            f"+SUMPRODUCT({rng_park_g},{rng_park_g_rate})"
-            f'+SUMPRODUCT(({_rng_type}="{TYPE_PARKING}")*{_rng("S коммерции 1 эт., м2")}*{_rng("Ставка СМР коммерции паркинга, руб/м2")})'
-            f'+SUMPRODUCT(({_rng_type}="{TYPE_PARKING}")*{_rng("S кладовых, м2")}*{_rng("Ставка СМР кладовых паркинга, руб/м2")}))'
-            f"*{_hs}$E$4"
-        )
-    else:
-        parking_total_formula = 0
-    ws_dash[f"G{struct_row + 1}"] = f"='{HELPER_SHEET_NAME}'!{COL['Аллоцированные затраты']}{total_row1}"
-    ws_dash[f"G{struct_row + 2}"] = f"='{HELPER_SHEET_NAME}'!{COL['Себестоимость коробки (методика)']}{total_row1}"
-    ws_dash[f"G{struct_row + 3}"] = f"='{HELPER_SHEET_NAME}'!{COL['Наружные работы блока (G), руб']}{total_row1}"
-    ws_dash[f"G{struct_row + 4}"] = f"='{HELPER_SHEET_NAME}'!{COL['Прочие затраты блока (Z), руб']}{total_row1}"
-    ws_dash[f"G{struct_row + 5}"] = parking_total_formula
-    for r in range(struct_row + 1, struct_row + 1 + len(cost_labels)):
-        ws_dash[f"G{r}"].number_format = MONEY_MM_FMT
-
-    dash_pie = PieChart()
-    dash_pie.height, dash_pie.width = 8.5, 10.5
-    dash_data_pie = Reference(ws_dash, min_col=7, min_row=struct_row, max_row=struct_row + len(cost_labels))
-    dash_cats_pie = Reference(ws_dash, min_col=6, min_row=struct_row + 1, max_row=struct_row + len(cost_labels))
-    dash_pie.add_data(dash_data_pie, titles_from_data=True)
-    dash_pie.set_categories(dash_cats_pie)
-    dash_pie.dataLabels = DataLabelList()
-    dash_pie.dataLabels.showPercent = True
-    dash_pie.dataLabels.showCatName = False
-    dash_pie.dataLabels.showSerName = False
-    dash_pie.dataLabels.showVal = False
-    dash_pie.dataLabels.showLegendKey = False
-    dash_pie.legend.position = "b"
-    dash_pie.series[0].data_points = [
-        DataPoint(idx=i, spPr=GraphicalProperties(solidFill=XL_GREEN_RAMP5[i % len(XL_GREEN_RAMP5)]))
-        for i in range(len(cost_labels))
+    general_contractor = "+".join(
+        r_leaf_formula(("Z_PCT", "Z.10.10"), name).removeprefix("=")
+        for name in all_block_names
+    ) if all_block_names else "0"
+    parking_col = get_column_letter(GZ_COL_PARKING)
+    parking = f"SUM('{SHEET2_NAME}'!{parking_col}{gz_first_row}:{parking_col}{gz_last_row})" if N_ROWS else "0"
+    cost_parts = [
+        ("A–E", helper_total("Себестоимость коробки (методика)")),
+        ("Паркинги", parking),
+        ("Наружные работы (G)", helper_total("Наружные работы блока (G), руб")),
+        ("Прочие СМР (Z)", f"{helper_total('Прочие затраты блока (Z), руб')}-({general_contractor})"),
+        ("Генподряд", general_contractor),
+        ("Инфраструктура", helper_total("Инфраструктура блока (Z5010), руб")),
+        ("Косвенные", helper_total("Аллоцированные затраты")),
     ]
-    ws_dash.add_chart(dash_pie, f"F{struct_row + len(cost_labels) + 1}")
-
-    note_row = struct_row + len(cost_labels) + 22
-    ws_dash[f"B{note_row}"] = (
-        "Источник: листы «Экономика проекта» и «СМР по методике». Диаграммы — с учетом коэфф. выручки/затрат сценария."
-    )
-    ws_dash[f"B{note_row}"].font = Font(name=XL_FONT, size=8, italic=True, color=XL_GRAY)
+    note_row = report.dashboard_breakdowns(
+        ws_dash, blocks, COL, HELPER_SHEET_NAME, first_row1, total_row1, cost_parts
+    ) + 2
+    ws_dash.cell(note_row, 2, "Данные по выбранному сценарию. Генподряд показан отдельно от прочих СМР (Z).")
+    ws_dash.cell(note_row, 2).font = Font(name=XL_FONT, size=9, color=report.MUTED_COLOR)
+    ws_dash.merge_cells(start_row=note_row, start_column=2, end_row=note_row, end_column=10)
 
     ws_dash.page_setup.orientation = "landscape"
     ws_dash.page_setup.fitToWidth = 1
     ws_dash.page_setup.fitToHeight = 1
     ws_dash.sheet_properties.pageSetUpPr.fitToPage = True
-    ws_dash.print_area = f"A1:H{note_row + 2}"
+    ws_dash.print_area = f"A1:J{note_row + 2}"
     ws_dash.page_margins.left = 0.3
     ws_dash.page_margins.right = 0.3
     ws_dash.page_margins.top = 0.3
@@ -4314,19 +4229,17 @@ def build_excel_report() -> bytes:
             ws_sources.append(["МП" if is_mp_stage else "ЭП", _name, _r["Код"], _r["Статья затрат"], _r["Единица измерения"], _r["Ставка, руб/ед."], _r.get("Применимость", "Уточнить"), _r.get("Аналог", ""), _r.get("Дата цен", ""), _r.get("Состав работ / комментарий", "")])
     ui_v2.style_input_sheet(ws_sources, seo=True)
     ws_gz = wb.create_sheet("G и Z — суммы статей")
-    ws_gz.append(["Блок", "Код", "Статья", "Сумма со сценарием, руб"])
+    report.report_heading(ws_gz, report_context, ["Блок", "Код", "Статья", "Сумма со сценарием, руб."])
     for _name in all_block_names:
         for _kind, _items in [("G_AREA", ITEMS_G_AREA), ("G_LENGTH", ITEMS_G_LENGTH), ("Z_PCT", ITEMS_Z_PCT), ("Z_FIXED", ITEMS_Z_FIXED)]:
             for _code, _label, *_ in _items:
                 ws_gz.append([_name, _code, _label, r_leaf_formula((_kind, _code), _name)])
-    ui_v2.style_input_sheet(ws_gz)
     ws_infra = wb.create_sheet("Инфраструктура — состав")
-    ws_infra.append(["Блок", "Статья", "Сумма, руб", "Со сценарием, руб"])
+    report.report_heading(ws_infra, report_context, ["Блок", "Статья", "Сумма, руб.", "Со сценарием, руб."])
     for _name in all_block_names:
         for _, _r in st.session_state.block_infra[_name].iterrows():
             _ri = ws_infra.max_row + 1
             ws_infra.append([_name, _r["Статья затрат"], _r["Сумма, руб"], f"=C{_ri}*'{HELPER_SHEET_NAME}'!$E$4"])
-    ui_v2.style_input_sheet(ws_infra, seo=True)
     # Mark scalar catalog inputs consistently. Formula cells are always grey.
     for _sheet in (ws2,):
         for _row in _sheet:
@@ -4336,6 +4249,28 @@ def build_excel_report() -> bytes:
     ui_v2.add_review_report(wb, st.session_state, blocks, active_items, is_mp_stage, item_cost_matrix,
         qty_by_basis, cost_factor, HELPER_SHEET_NAME, COL, first_row1, r_leaf_formula,
         ITEMS_G_AREA, ITEMS_G_LENGTH, ITEMS_Z_PCT, ITEMS_Z_FIXED)
+    for sheet in (ws_gz, ws_indirect, ws_infra):
+        report.report_table(sheet, report.DETAIL_HEADER, sheet.max_row, 1, 4)
+        for column, width in zip("ABCD", (24, 46, 54 if sheet is ws_gz else 23, 26)):
+            sheet.column_dimensions[column].width = width
+    for sheet_name in ("Блоки", "Бюджет по статьям", "Элементы B20.10", "Косвенные"):
+        report.report_heading(wb[sheet_name], report_context)
+    report.add_sales(wb["Блоки"], blocks, first_row1, COL, HELPER_SHEET_NAME)
+    ws_report["A1"] = "Экономика проекта"
+    report.title(ws_report["A1"])
+    ws_report["A2"] = report_context
+    ws_report["A2"].font = Font(name=XL_FONT, size=10, color=report.MUTED_COLOR)
+    ws_report.row_dimensions[1].height = 24
+    ws_report["A3"] = None
+    report_sections = {ROW_SUBHDR, ROW_SEC_AREA, ROW_SEC_PRICE, ROW_SEC_EXPENSES, ROW_SEC_SMR}
+    report_totals = {
+        ROW_REV_TOTAL, ROW_SMR_TOTAL, ROW_KOROBKA_TOTAL, ROW_DIRECT, ROW_ALLOC,
+        ROW_FULL, ROW_REVENUE2, ROW_PROFIT, ROW_MARGIN,
+        *(row for row, level, *_ in catalog_rows_meta if level in ("group", "subgroup")),
+    }
+    report.report_table(ws_report, ROW_BLOCK_HDR, report_last_row, 1, n_cols_report,
+                        totals=report_totals, subheaders=report_sections)
+    report.negative_values(ws_report, f"E{ROW_PROFIT}:{get_column_letter(n_cols_report)}{ROW_MARGIN}")
     wb.calculation.fullCalcOnLoad = True
     desired_order = ["Дашборд", "Блоки", "Бюджет по статьям", "Элементы B20.10", "Косвенные", SHEET1_NAME, SHEET2_NAME, "ТЭП A–E", "Геометрия МП", "Детализация ЭП", "Источники ставок A–E", "G и Z — суммы статей", "Косвенные — состав", "Инфраструктура — состав", HELPER_SHEET_NAME]
     wb._sheets = [wb[name] for name in desired_order if name in wb.sheetnames]
