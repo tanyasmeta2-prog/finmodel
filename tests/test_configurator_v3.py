@@ -135,3 +135,52 @@ def test_excel_preview_maps_two_residential_blocks_and_parking_and_applies_zeros
     assert blocks.loc["УБ 2", "S квартир, м2"] == 0
     assert at.session_state["block_ids"]["УБ 2"] == identity
     assert "Изменённое имя" not in blocks.index
+
+
+def test_consecutive_block_edits_keep_same_grid_and_preserve_values():
+    from pathlib import Path
+    from streamlit.testing.v1 import AppTest
+
+    at = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app.py")).run()
+    grid = next(frame for frame in at.dataframe if "-blocks_editor_" in frame.proto.id)
+    widget_id = grid.proto.id
+    edits = {}
+    for column, value in [
+        ("S квартир, м2", "1 000,25"),
+        ("S коммерции 1 эт., м2", "450"),
+        ("S кладовых, м2", "51,75"),
+        ("S квартир, м2", "0,00"),
+    ]:
+        edits[column] = value
+        states = at._tree.get_widget_states()
+        states.widgets.add(id=widget_id, string_value=json.dumps({
+            "edited_rows": {"0": edits}, "added_rows": [], "deleted_rows": [],
+        }))
+        at._run(states)
+        assert not at.exception, [error.message for error in at.exception]
+        assert any(frame.proto.id == widget_id for frame in at.dataframe)
+        area = float(value.replace(" ", "").replace(",", "."))
+        assert at.session_state["blocks_df"].loc[0, column] == area
+
+    states = at._tree.get_widget_states()
+    states.widgets.add(id=widget_id, string_value=json.dumps({
+        "edited_rows": {"0": edits},
+        "added_rows": [{"Название блока": "УБ 2", "S квартир, м2": "125"}],
+        "deleted_rows": [],
+    }))
+    at._run(states)
+    assert not at.exception, [error.message for error in at.exception]
+    blocks = at.session_state["blocks_df"]
+    assert blocks["Название блока"].tolist() == ["УБ 1", "УБ 2"]
+    assert blocks["S квартир, м2"].tolist() == [0, 125]
+    assert blocks["S коммерции 1 эт., м2"].tolist() == [450, 0]
+
+    grid = next(frame for frame in at.dataframe if "-blocks_editor_" in frame.proto.id)
+    states = at._tree.get_widget_states()
+    states.widgets.add(id=grid.proto.id, string_value=json.dumps({
+        "edited_rows": {}, "added_rows": [], "deleted_rows": [0],
+    }))
+    at._run(states)
+    assert not at.exception, [error.message for error in at.exception]
+    assert at.session_state["blocks_df"]["Название блока"].tolist() == ["УБ 2"]
+    assert at.session_state["blocks_df"]["S квартир, м2"].tolist() == [125]
