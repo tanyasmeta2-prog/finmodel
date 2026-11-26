@@ -34,10 +34,12 @@ import io
 import json
 import re
 import threading
+from copy import deepcopy
 from datetime import datetime
 from importlib import reload
 from io import BytesIO
 from pathlib import Path
+from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -65,7 +67,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 @st.cache_resource
-def refresh_ui_after_deploy():
+def refresh_ui_after_deploy(revision):
     import review_v3
 
     reload(review_v3)
@@ -74,8 +76,8 @@ def refresh_ui_after_deploy():
 
 # A Streamlit Cloud source update can rerun this script in the existing Python process.
 # Refresh the two UI modules when that process still holds the previous interface.
-if not hasattr(ui_v2, "format_number"):
-    refresh_ui_after_deploy()
+if not hasattr(ui_v2, "reset_editors"):
+    refresh_ui_after_deploy("stable-input")
 @st.cache_resource
 def refresh_excel_import_after_deploy():
     reload(sparse_excel)
@@ -1375,10 +1377,11 @@ def base_row_table(store_key: str, cols: list, default_keys: dict, block_names: 
         cfg[c] = st.column_config.NumberColumn(labels[c], min_value=0, format=formats.get(c, "localized"))
     ver = st.session_state.get(f"_ver_{editor_key}", 0)
     ed = ui_v2.editor(st,
-        df, key=f"{editor_key}_{ver}", hide_index=True, num_rows="fixed", width="stretch",
+        df, key=f"{editor_key}_{ver}", row_identity=df["Блок"], hide_index=True, num_rows="fixed", width="stretch",
         column_order=["Блок"] + cols + [RESET_COL, CHANGED_COL], column_config=cfg,
     )
     new_defaults = {c: _num(ed.iloc[0][c]) for c in cols}
+    reset_rows = False
     changed_any = False
     for i in range(1, len(ed)):
         n = ed.iloc[i]["Блок"]
@@ -1386,6 +1389,7 @@ def base_row_table(store_key: str, cols: list, default_keys: dict, block_names: 
             for c in cols:
                 store[n][c] = new_defaults[c]
             changed_any = True
+            reset_rows = True
             continue
         for c in cols:
             v = _num(ed.iloc[i][c])
@@ -1393,12 +1397,14 @@ def base_row_table(store_key: str, cols: list, default_keys: dict, block_names: 
                 store[n][c] = v
                 changed_any = True
     if new_defaults != defaults:
+        reset_rows = True  # drop previous cell deltas after changing inherited rates
         for c in cols:
             st.session_state[default_keys[c]] = new_defaults[c]
         store = cascade_sync(store_key, block_names, new_defaults)
         changed_any = True
-    if changed_any:
+    if reset_rows:
         _bump(editor_key)
+    if changed_any:
         st.rerun()
     return store
 
@@ -2340,6 +2346,7 @@ def apply_input_plan(kind, changes, count):
         for key, value in changes.items():
             st.session_state[key] = value
         st.session_state["_import_status"] = f"Применено полей: {count}."
+    ui_v2.reset_editors(st)
     st.session_state["_input_generation"] = st.session_state.get("_input_generation", 0) + 1
     st.session_state.pop("_input_preview", None)
 
@@ -2455,6 +2462,7 @@ with st.sidebar:
     def _cb_open(ref):
         # в callback: запускается до отрисовки виджетов — можно менять их значения
         if autosave_load(ref):
+            ui_v2.reset_editors(st)
             st.session_state["_autosave_loaded"] = True
             st.session_state.pop("_last_saved_sig", None)
             st.session_state.pop("_stage_seg", None)
@@ -2517,7 +2525,7 @@ with st.sidebar:
 # ======================================================================
 # 5. ШАПКА (на всех вкладках): проект, город, стадия, сценарий, Excel + KPI
 # ======================================================================
-st.caption("ТАЛАН · Экспресс-модель МП и ЭП")
+st.caption("ТАЛАН · Экспресс-модель МП и ЭП · обновление ввода")
 st.title("Расчёт посадок · Версия 3")
 h1, h2, h3, h4, h5 = st.columns([3, 1.3, 1.1, 1.4, 1.5], vertical_alignment="bottom")
 with h1:
@@ -2611,20 +2619,12 @@ with tab1:
         if col not in _view.columns:
             _view[col] = 0.0
         _view[col] = pd.to_numeric(_view[col], errors="coerce").fillna(0.0)
-    _view_res = _view["Тип блока"] == TYPE_RESIDENTIAL
-    _view["NSA, м2"] = np.where(
-        _view_res,
-        _view["S квартир, м2"] + _view["S коммерции 1 эт., м2"] + _view["S кладовых, м2"],
-        _view["S коммерции 1 эт., м2"] + _view["S кладовых, м2"],
-    )
     _identities = block_identity(st.session_state, _view["Название блока"])
     _view[BLOCK_ID] = _view["Название блока"].map(_identities)
     column_config = {
         BLOCK_ID: None,
         "Название блока": st.column_config.TextColumn("Название", required=True, width="medium", pinned=True),
         "Тип блока": st.column_config.SelectboxColumn(options=BLOCK_TYPES, required=True, width="medium"),
-        "NSA, м2": st.column_config.NumberColumn("NSA, м²", format="localized", disabled=True, width="small",
-                                                 help="Продаваемая площадь: квартиры + коммерция + кладовые"),
     }
     for col in MAIN_TABLE_NUMERIC_COLS:
         if col in LOCKED_S_COLS:
@@ -2649,7 +2649,7 @@ with tab1:
         hide_index=True,
         key="blocks_editor",
         disabled=[BLOCK_ID],
-        column_order=MAIN_TABLE_COLS + ["NSA, м2"],
+        column_order=MAIN_TABLE_COLS,
         column_config=column_config,
     )
     blocks = edited[MAIN_TABLE_COLS + [BLOCK_ID]].copy()
@@ -2683,6 +2683,10 @@ with tab1:
     is_res = (blocks["Тип блока"] == TYPE_RESIDENTIAL)
     is_park = (blocks["Тип блока"] == TYPE_PARKING)
     blocks.loc[is_res, NAZEMNY_PARKING_COL] = 0.0
+    original_edit = edited[MAIN_TABLE_COLS].astype(object)
+    incoming = original_edit.where(original_edit.notna(), None).to_dict("records")
+    if blocks.to_dict("records") != incoming:
+        st.session_state["_refresh_after_row_change"] = True
     st.caption("✎ — редактируется. 🔒 — только просмотр. Площади передаются в СМР автоматически.")
 
 all_block_names = list(blocks["Название блока"])
@@ -2861,6 +2865,9 @@ nsa = np.where(
     blocks["S коммерции 1 эт., м2"] + blocks["S кладовых, м2"],
 ).astype(float)
 blocks["NSA, м2"] = nsa
+with tab1:
+    with st.expander("Продаваемая площадь по УБ"):
+        ui_v2.readonly(st, blocks[["Название блока", "NSA, м2"]], hide_index=True)
 
 elevator_stops_arr = np.array([
     float(st.session_state.block_elevator_stops.get(blocks["Название блока"].iloc[i], 0.0)) if is_res[i] else 0.0
@@ -2932,6 +2939,7 @@ with sub_gz:
                         for _store_name, _ in GZ_STORES:
                             st.session_state[_store_name][_t] = st.session_state[_store_name][gz_block].copy()
                     st.session_state.pop("copy_gz_targets", None)
+                    ui_v2.reset_editors(st)
                     st.rerun()
         gz_strip = st.container()
         _plot = float(blocks.loc[blocks["Название блока"] == gz_block, "Площадь участка блока, га"].iloc[0])
@@ -3543,7 +3551,7 @@ def autosize(ws, n_cols, width=15):
         ws.column_dimensions[get_column_letter(c)].width = width
 
 
-def build_excel_report() -> bytes:
+def build_excel_report(state) -> bytes:
     """Собирает Excel-отчет с живыми формулами и встроенными графиками.
     Лист 1 ссылается на Лист 2 для себестоимости коробки жилых блоков —
     изменение ставок в каталоге (Лист 2) пересчитывает весь отчет."""
@@ -3588,7 +3596,7 @@ def build_excel_report() -> bytes:
     ws2["A2"] = f"Проект: {project_name} | Сценарий: {scenario_name}"
 
     calc_header_row, calc_first_row, calc_last_row, total_col_idx2, group_last_row = ui_v2.stage_workbook(
-        wb, ws2, st.session_state, active_items, blocks, res_block_names, is_mp_stage,
+        wb, ws2, state, active_items, blocks, res_block_names, is_mp_stage,
         HELPER_SHEET_NAME, first_row1, COL, f"'{HELPER_SHEET_NAME}'!$E$4",
     )
 
@@ -3601,34 +3609,34 @@ def build_excel_report() -> bytes:
     gz_block_names = list(blocks["Название блока"])
     g_area_rate_series = {
         name: pd.to_numeric(
-            st.session_state.block_g_area.get(name, DEFAULT_G_AREA_DF).set_index("Код")["Ставка, руб/ед."],
+            state["block_g_area"].get(name, DEFAULT_G_AREA_DF).set_index("Код")["Ставка, руб/ед."],
             errors="coerce",
         ).fillna(0.0)
         for name in gz_block_names
     }
     g_length_qty_series = {
         name: pd.to_numeric(
-            st.session_state.block_g_length.get(name, DEFAULT_G_LENGTH_DF).set_index("Код")["Кол-во"], errors="coerce"
+            state["block_g_length"].get(name, DEFAULT_G_LENGTH_DF).set_index("Код")["Кол-во"], errors="coerce"
         ).fillna(0.0)
         for name in gz_block_names
     }
     g_length_rate_series = {
         name: pd.to_numeric(
-            st.session_state.block_g_length.get(name, DEFAULT_G_LENGTH_DF).set_index("Код")["Ставка, руб/ед."],
+            state["block_g_length"].get(name, DEFAULT_G_LENGTH_DF).set_index("Код")["Ставка, руб/ед."],
             errors="coerce",
         ).fillna(0.0)
         for name in gz_block_names
     }
     z_pct_rate_series = {
         name: pd.to_numeric(
-            st.session_state.block_z_pct.get(name, DEFAULT_Z_PCT_DF).set_index("Код")["Ставка, доля от СМР+G"],
+            state["block_z_pct"].get(name, DEFAULT_Z_PCT_DF).set_index("Код")["Ставка, доля от СМР+G"],
             errors="coerce",
         ).fillna(0.0)
         for name in gz_block_names
     }
     z_fixed_sum_series = {
         name: pd.to_numeric(
-            st.session_state.block_z_fixed.get(name, DEFAULT_Z_FIXED_DF).set_index("Код")["Сумма, руб"],
+            state["block_z_fixed"].get(name, DEFAULT_Z_FIXED_DF).set_index("Код")["Сумма, руб"],
             errors="coerce",
         ).fillna(0.0)
         for name in gz_block_names
@@ -3850,7 +3858,7 @@ def build_excel_report() -> bytes:
     _ind_rows = {}
     for _key, _label in TPL_INDIRECT_SECTIONS.items():
         _ind_rows[_key] = []
-        _df = st.session_state.get("indirect_items", {}).get(_key, pd.DataFrame())
+        _df = state["indirect_items"].get(_key, pd.DataFrame())
         for _, _r in _df.iterrows():
             _ri = ws_indirect.max_row + 1
             ws_indirect.append([_label, _r.get("Наименование", _label), _xl_num(_r.get("Сумма, руб")), f"=C{_ri}*'{HELPER_SHEET_NAME}'!$E$4"])
@@ -3880,7 +3888,7 @@ def build_excel_report() -> bytes:
         # Инфраструктура блока (Z.50.10, Вкладка 4) — детализация по статьям
         # не выгружается (только итог по блоку), поэтому пишется как значение,
         # а не как формула со ссылкой на отдельный лист-каталог.
-        _infra_last = max(detail_first, report.DETAIL_HEADER + sum(len(st.session_state.block_infra.get(_n, EMPTY_INFRA_DF)) for _n in all_block_names))
+        _infra_last = max(detail_first, report.DETAIL_HEADER + sum(len(state["block_infra"].get(_n, EMPTY_INFRA_DF)) for _n in all_block_names))
         f_infra = f"=SUMIF('Инфраструктура — состав'!$A${detail_first}:$A${_infra_last},A{r1},'Инфраструктура — состав'!$D${detail_first}:$D${_infra_last})"
         f_direct = (
             f'=IF({c["Тип блока"]}{r1}="{TYPE_RESIDENTIAL}",'
@@ -4506,7 +4514,7 @@ def build_excel_report() -> bytes:
     ws_sources = wb.create_sheet("Источники ставок A–E")
     ws_sources.append(["Стадия", "Блок", "Код", "Статья", "Единица", "Ставка", "Применимость", "Аналог", "Дата цен", "Состав работ / комментарий"])
     for _name in res_block_names:
-        for _, _r in st.session_state[active_store][_name].iterrows():
+        for _, _r in state[active_store][_name].iterrows():
             if _r["Код"] in ui_v2.DETAIL_CODES:
                 continue
             ws_sources.append(["МП" if is_mp_stage else "ЭП", _name, _r["Код"], _r["Статья затрат"], _r["Единица измерения"], _r["Ставка, руб/ед."], _r.get("Применимость", "Уточнить"), _r.get("Аналог", ""), _r.get("Дата цен", ""), _r.get("Состав работ / комментарий", "")])
@@ -4520,7 +4528,7 @@ def build_excel_report() -> bytes:
     ws_infra = wb.create_sheet("Инфраструктура — состав")
     report.report_heading(ws_infra, report_context, ["Блок", "Статья", "Сумма, руб.", "Со сценарием, руб."])
     for _name in all_block_names:
-        for _, _r in st.session_state.block_infra[_name].iterrows():
+        for _, _r in state["block_infra"][_name].iterrows():
             _ri = ws_infra.max_row + 1
             ws_infra.append([_name, _r["Статья затрат"], _r["Сумма, руб"], f"=C{_ri}*'{HELPER_SHEET_NAME}'!$E$4"])
     # Mark scalar catalog inputs consistently. Formula cells are always grey.
@@ -4529,7 +4537,7 @@ def build_excel_report() -> bytes:
             for _cell in _row:
                 if _cell.data_type == "f":
                     _cell.fill = ui_v2.GRAY
-    ui_v2.add_review_report(wb, st.session_state, blocks, active_items, is_mp_stage, item_cost_matrix,
+    ui_v2.add_review_report(wb, state, blocks, active_items, is_mp_stage, item_cost_matrix,
         qty_by_basis, cost_factor, HELPER_SHEET_NAME, COL, first_row1, r_leaf_formula,
         ITEMS_G_AREA, ITEMS_G_LENGTH, ITEMS_Z_PCT, ITEMS_Z_FIXED)
     for sheet in (ws_gz, ws_indirect, ws_infra):
@@ -4574,18 +4582,25 @@ def build_excel_report() -> bytes:
     return buffer.getvalue()
 
 
-excel_bytes = build_excel_report()
+def report_download():
+    keys = {"block_rates", "block_mp_rates", "mp_sections", "ep_details", "thermal_kind",
+            "facade_modes", "tep_store", "block_elevator_stops", "block_g_area", "block_g_length",
+            "block_z_pct", "block_z_fixed", "indirect_items", "block_infra"}
+    state = {key: deepcopy(st.session_state[key]) for key in keys}
+    return partial(build_excel_report, state)
+
+
 excel_slot.download_button(
     label="Скачать отчёт по экономике",
-    data=excel_bytes,
+    data=report_download(),
     file_name=f"{_slugify(project_name)}_{scenario_name}{'_черновик' if is_draft else ''}.xlsx",
     mime=EXCEL_MIME, icon=":material/download:", width="stretch", on_click="ignore",
     help="Итоги, бюджет по статьям и расшифровки затрат.",
 )
-archive_bytes = build_template_bytes(collect_template_data())
+archive_download = partial(build_template_bytes, collect_template_data())
 for slot, key in ((archive_slot, "download_archive"), (reset_archive_slot, "download_before_reset")):
     slot.download_button(
-        "Скачать архив для продолжения", data=archive_bytes,
+        "Скачать архив для продолжения", data=archive_download,
         file_name=f"{_slugify(project_name)}_архив.xlsx", mime=EXCEL_MIME, key=key,
         icon=":material/download:", width="stretch", on_click="ignore",
     )
@@ -4613,3 +4628,6 @@ else:
         save_status.caption("Сохранено на Яндекс Диск.")
     else:
         save_status.caption("Автосохранение на Яндекс Диск включено.")
+
+if st.session_state.pop('_refresh_after_row_change', False):
+    st.rerun()
