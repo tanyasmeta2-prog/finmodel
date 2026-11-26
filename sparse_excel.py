@@ -155,7 +155,7 @@ def build_template(fields, names):
     wb = Workbook()
     wb.remove(wb.active)
     instructions = (
-        'Заполняйте жёлтые ячейки. Пустые ячейки и нули пропускаются при загрузке.',
+        'Заполняйте жёлтые ячейки. Пустые ячейки пропускаются. Для загрузки нулей включите их в предпросмотре.',
         'Названия УБ в шапках должны совпадать с модулем. Для нового УБ добавьте столбец с его названием.',
         'Для нового паркинга выберите тип на листе «ТЭП». Доли вводите со знаком %, например 6%.',
     )
@@ -214,10 +214,19 @@ def load_template(file_bytes):
         wb = load_workbook(BytesIO(file_bytes), data_only=True)
     except Exception:
         return None
-    return wb if any(sheet in wb and wb[sheet]['A1'].value in (MARKER, LINKED_MARKER) for sheet in SHEETS) else None
+    if not any(sheet in wb and wb[sheet]['A1'].value in (MARKER, LINKED_MARKER) for sheet in SHEETS):
+        return None
+    formulas = load_workbook(BytesIO(file_bytes), data_only=False)
+    wb.input_formulas = {
+        (name, cell.coordinate)
+        for name in SHEETS if name in formulas
+        for row in formulas[name].iter_rows()
+        for cell in row if cell.data_type == 'f'
+    }
+    return wb
 
 
-def _input_value(raw, field):
+def _input_value(raw, field, allow_zeros=False):
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return None
     if field.options:
@@ -246,7 +255,7 @@ def _input_value(raw, field):
         raise ValueError('введите долю со знаком %, например 6%')
     if field.unit in ('шт', 'м/м', 'компл.') and not value.is_integer():
         raise ValueError('введите целое количество')
-    return value or None
+    return value if value or allow_zeros else None
 
 
 def _block_columns(ws):
@@ -256,7 +265,20 @@ def _block_columns(ws):
     }
 
 
-def read_updates(wb, fields):
+def read_updates(wb, fields, *, allow_zeros=False, skipped=None):
+    formulas = getattr(wb, 'input_formulas', set())
+    skipped = [] if skipped is None else skipped
+
+    def input_value(sheet, cell, field):
+        address = f'«{sheet}», {cell.coordinate}'
+        if (sheet, cell.coordinate) in formulas and cell.value is None:
+            warnings.append(f'{address}: формула без сохранённого результата. Пересчитайте файл в Excel или вставьте значение.')
+            return None
+        value = _input_value(cell.value, field, allow_zeros)
+        if value is None and cell.value is not None and str(cell.value).strip():
+            skipped.append(f'{address}: ноль пропущен.')
+        return value
+
     linked = any(name in wb and wb[name]['A1'].value == LINKED_MARKER for name in SHEETS)
     if linked and ('ТЭП' not in wb or wb['ТЭП']['A1'].value != LINKED_MARKER):
         return [], ['В новом шаблоне заголовки блоков берутся с листа «ТЭП». Восстановите этот лист.']
@@ -279,7 +301,7 @@ def read_updates(wb, fields):
         for row in ws.iter_rows(min_row=HEADER + 1):
             marker = row[0].value
             if marker in ('mp-geometry', 'ep-elements'):
-                updates.extend(_repeatable_updates(name, row, warnings))
+                updates.extend(_repeatable_updates(name, row, warnings, input_value))
                 continue
             field = catalog.get(marker)
             if field is None:
@@ -287,7 +309,7 @@ def read_updates(wb, fields):
             for cell in row[FIRST_BLOCK - 1:]:
                 address = f'«{name}», {cell.coordinate}'
                 try:
-                    value = _input_value(cell.value, field)
+                    value = input_value(name, cell, field)
                 except ValueError as error:
                     warnings.append(f'{address}: {error}.')
                     continue
@@ -309,7 +331,7 @@ def read_updates(wb, fields):
     return updates, warnings
 
 
-def _repeatable_updates(sheet, row, warnings):
+def _repeatable_updates(sheet, row, warnings, input_value):
     marker = row[0].value
     if not any(cell.value not in (None, '') for cell in row[1:9]):
         return
@@ -338,7 +360,7 @@ def _repeatable_updates(sheet, row, warnings):
                                 'ep_details', column, label, applies=(TYPE_RESIDENTIAL,)))]
     for cell, field in specs:
         try:
-            value = _input_value(cell.value, field)
+            value = input_value(sheet, cell, field)
         except ValueError as error:
             warnings.append(f'«{sheet}», {cell.coordinate}: {error}.')
             continue
@@ -346,7 +368,7 @@ def _repeatable_updates(sheet, row, warnings):
             yield f'«{sheet}», {cell.coordinate}', block, field, value
 
 
-def merge_updates(state, updates, warnings, default_block, catalogs, cascade_defaults):
+def merge_updates(state, updates, warnings, default_block, catalogs, cascade_defaults, *, audit=None):
     """Build changes off-session. Leave existing inputs, project fields and widget state intact."""
     types = {name: value for _, name, field, value in updates if field.column == BLOCK_TYPE}
     blocks = state.get('blocks_df', default_block).copy(deep=True).reset_index(drop=True)
@@ -358,6 +380,17 @@ def merge_updates(state, updates, warnings, default_block, catalogs, cascade_def
         if key not in changed:
             changed[key] = deepcopy(state.get(key, {}))
         return changed[key]
+
+    def record_value(name, field, value, previous):
+        if audit is None:
+            return
+        if pd.isna(previous):
+            previous = None
+        change = 'Без изменений' if previous == value else 'Заполнить' if previous is None else 'Перезаписать'
+        audit.append({
+            'УБ': name, 'Поле': field.label, 'Действие': change,
+            'Было': '' if previous is None else str(previous), 'Из файла': str(value),
+        })
 
     seen_rows = set()
     for address, name, field, value in updates:
@@ -376,6 +409,8 @@ def merge_updates(state, updates, warnings, default_block, catalogs, cascade_def
             warnings.append(f'{address}: показатель не применяется для блока «{name}» этого типа.')
             continue
         if name not in rows:
+            if audit is not None:
+                audit.append({'УБ': name, 'Поле': 'Урбан-блок', 'Действие': 'Создать', 'Было': '', 'Из файла': btype})
             rows[name] = len(blocks)
             blocks.loc[len(blocks)] = {**default_block.iloc[0].to_dict(), BLOCK_NAME: name, BLOCK_TYPE: btype}
             changed['blocks_df'] = blocks
@@ -385,6 +420,7 @@ def merge_updates(state, updates, warnings, default_block, catalogs, cascade_def
             for key, fields in cascade_defaults.items():
                 store(key)[name] = dict.fromkeys(fields, 0.0)
         if field.store == 'blocks_df':
+            record_value(name, field, value, blocks.at[rows[name], field.column])
             blocks.at[rows[name], field.column] = value
             changed['blocks_df'] = blocks
         elif field.store == 'mp_sections':
@@ -398,6 +434,7 @@ def merge_updates(state, updates, warnings, default_block, catalogs, cascade_def
                 frame = pd.concat([frame, pd.DataFrame([{SECTION_COLS[0]: field.code}])], ignore_index=True)
                 sections[name] = frame
                 match = frame[SECTION_COLS[0]].eq(field.code)
+            record_value(name, field, value, frame.loc[match, field.column].iloc[0])
             frame.loc[match, field.column] = int(value == 'Да') if field.options else value
         elif field.store == 'ep_details':
             details = store('ep_details')
@@ -412,6 +449,7 @@ def merge_updates(state, updates, warnings, default_block, catalogs, cascade_def
                 }])], ignore_index=True)
                 details[name] = frame
                 match = frame['Категория'].eq(field.code) & frame['Тип / материал / размеры'].fillna('').eq(field.key)
+            record_value(name, field, value, frame.loc[match, field.column].iloc[0])
             frame.loc[match, field.column] = value
             calculated = match & frame['Статус'].fillna('').isin(('', 'Нет данных'))
             calculated &= pd.to_numeric(frame['Объем'], errors='coerce').gt(0)
@@ -423,10 +461,15 @@ def merge_updates(state, updates, warnings, default_block, catalogs, cascade_def
                 reference = catalogs[field.store]
                 frame = pd.concat([frame, reference[reference['Код'] == field.code]], ignore_index=True)
                 store(field.store)[name] = frame
-            frame.loc[frame['Код'] == field.code, field.column] = value
+            match = frame['Код'] == field.code
+            record_value(name, field, value, frame.loc[match, field.column].iloc[0])
+            frame.loc[match, field.column] = value
         elif field.store in ('block_elevator_stops', 'thermal_kind', 'facade_modes'):
+            record_value(name, field, value, store(field.store).get(name))
             store(field.store)[name] = value
         else:
-            store(field.store).setdefault(name, {})[field.column] = value
+            row = store(field.store).setdefault(name, {})
+            record_value(name, field, value, row.get(field.column))
+            row[field.column] = value
         count += 1
     return changed, count
