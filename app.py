@@ -48,6 +48,7 @@ import streamlit as st
 import methodology_v2 as method_v2
 import version2_ui as ui_v2
 import report_presentation as report
+import sparse_excel
 from PIL import Image as PILImage
 
 from openpyxl import Workbook
@@ -2218,12 +2219,121 @@ def apply_imported_state(new_state: dict) -> None:
         st.session_state[k] = v
 
 
+STOPS_KEY = "__elevator_stops__"
+AREA_PARAMS = [
+    ("Общая площадь квартир (с летними, с коэф.), м2", "Общая площадь квартир (с коэф.)", "м²"),
+    ("Площадь коммерции, м2", "Площадь коммерции", "м²"),
+    ("Площадь кладовых в доме, м2", "Площадь кладовых", "м²"),
+    ("Площадь участка блока, га", "Площадь участка блока", "га"),
+]
+EP_ONLY_PARAMS = [
+    ("Кол-во секций, шт", "Секций (подъездов)", "шт"),
+    ("Кол-во квартир, шт", "Квартир", "шт"),
+    ("Кол-во лифтов, шт", "Лифтов", "шт"),
+    (STOPS_KEY, "Остановок лифтов (D.10.10)", "шт"),
+    ("Площадь застройки, м2", "Площадь застройки", "м²"),
+    ("Площадь фасада, м2", "Площадь фасада", "м²"),
+    ("Площадь остекления окон, м2", "Остекление окон", "м²"),
+    ("Площадь остекления лоджий, м2", "Остекление лоджий", "м²"),
+    ("Объем здания ниже 0, м3", "Объём ниже 0", "м³"),
+    ("Объем здания выше 0, м3", "Объём выше 0", "м³"),
+]
+PARKING_TEP_KEYS = {"Площадь коммерции, м2", "Площадь кладовых в доме, м2", "Площадь участка блока, га"}
+
+
+
+def sparse_template_fields():
+    field = sparse_excel.Field
+    residential = (TYPE_RESIDENTIAL,)
+    parking = (TYPE_PARKING,)
+    tep = [
+        field("block_type", "Блок", "Тип нового блока", "", "blocks_df", "Тип блока", options=tuple(BLOCK_TYPES)),
+        *(
+            field(key, "Площади", label, unit, "blocks_df", TEP_TO_MAIN_COL[key],
+                  applies=residential if "квартир" in label else tuple(BLOCK_TYPES))
+            for key, label, unit in AREA_PARAMS
+        ),
+        field("parking_underground", "Паркинг", "Подземные машино-места", "м/м",
+              "blocks_df", "Подземный паркинг, м/м", applies=residential),
+        field("parking_above", "Паркинг", "Наземные / многоуровневые машино-места", "м/м",
+              "blocks_df", "Наземный/Многоуровневый паркинг, м/м", applies=parking),
+    ]
+    prices = [
+        field(key, "Реализация", label, unit, "_cascade_prices", key,
+              applies=tuple(sorted(_PRICE_APPLIES[key])))
+        for key, label, unit in zip(
+            PRICE_COLS,
+            ("Квартиры", "Коммерция", "Кладовые", "Подземные машино-места", "Наземные машино-места"),
+            ("руб./м²", "руб./м²", "руб./м²", "руб./м/м", "руб./м/м"),
+        )
+    ]
+    volumes = [
+        field(key, "ЭП", label, unit, "block_elevator_stops" if key == STOPS_KEY else "tep_store",
+              key, applies=residential)
+        for key, label, unit in EP_ONLY_PARAMS + method_v2.EXTRA_PARAMS
+    ]
+    volumes.append(field("thermal_kind", "ЭП", "Тип теплоснабжения", "", "thermal_kind", "thermal_kind",
+                         options=("ИТП", "Котельная"), applies=residential))
+    volumes.append(field("facade_mode", "ЭП", "Режим расчёта фасада B20.10", "", "facade_modes", "facade_modes",
+                         options=("Укрупнённый", "Детальный"), applies=residential))
+    volumes.extend(field("g_qty_" + code, "Наружные сети (G)", f"{code} · {name}", "п.м.",
+                         "block_g_length", "Кол-во", code)
+                   for code, name, *_ in ITEMS_G_LENGTH)
+
+    rates = [field(key, "Паркинг", label, unit, "_cascade_smr_parking", key,
+                   applies=tuple(sorted(_PARK_APPLIES[key])))
+             for key, label, unit in zip(
+                 SMR_PARKING_RATE_COLS,
+                 ("СМР подземных машино-мест", "СМР наземных машино-мест", "СМР коммерции в паркинге",
+                  "СМР кладовых в паркинге"),
+                 ("руб./м/м", "руб./м/м", "руб./м²", "руб./м²"),
+             )]
+    for stage, items, target in (("МП", method_v2.MP_ITEMS, "block_mp_rates"), ("ЭП", ITEMS, "block_rates")):
+        rates.extend(field(stage + code, stage + " · " + group, f"{code} · {label}", unit,
+                           target, method_v2.RATE, code, applies=residential)
+                     for code, label, group, unit, *_ in items)
+    for items, target, group, column, unit in (
+        (ITEMS_G_AREA, "block_g_area", "Наружные работы (G)", method_v2.RATE, "руб./га участка"),
+        (ITEMS_G_LENGTH, "block_g_length", "Наружные сети (G)", method_v2.RATE, "руб./п.м."),
+        (ITEMS_Z_PCT, "block_z_pct", "Прочие работы (Z)", "Ставка, доля от СМР+G", "%"),
+        (ITEMS_Z_FIXED, "block_z_fixed", "Прочие работы (Z)", "Сумма, руб", "руб."),
+    ):
+        rates.extend(field(target + code, group, f"{code} · {label}", unit, target, column, code)
+                     for code, label, *_ in items)
+    return dict(zip(sparse_excel.SHEETS, (tep, prices, volumes, rates)))
+
+
+def import_sparse_template(book):
+    updates, warns = sparse_excel.read_updates(book, sparse_template_fields())
+    changes, count = sparse_excel.merge_updates(
+        st.session_state, updates, warns, generate_default_table(),
+        {
+            "block_rates": DEFAULT_RATES_DF,
+            "block_mp_rates": method_v2.rates_frame(method_v2.MP_ITEMS),
+            "block_g_area": DEFAULT_G_AREA_DF, "block_g_length": DEFAULT_G_LENGTH_DF,
+            "block_z_pct": DEFAULT_Z_PCT_DF, "block_z_fixed": DEFAULT_Z_FIXED_DF,
+        },
+        {"_cascade_prices": PRICE_COLS, "_cascade_smr_parking": SMR_PARKING_RATE_COLS},
+    )
+    for key, value in changes.items():
+        st.session_state[key] = value
+    if count:
+        nblocks = len(changes.get("blocks_df", st.session_state.get("blocks_df", generate_default_table())))
+        return [f"Загружено значений: {count}. Блоков в проекте: {nblocks}."] + warns
+    return ["В шаблоне нет значений для загрузки. Пустые ячейки и нули пропущены."] + warns
+
+
 def _cb_import_template():
     f = st.session_state.get("_tpl_upload")
     if f is None:
         st.session_state["_tpl_msgs"] = ["Сначала выберите файл."]
         return
-    new_state, warns = parse_template(f.getvalue())
+    data = f.getvalue()
+    book = sparse_excel.load_template(data)
+    if book is not None:
+        st.session_state["_tpl_msgs"] = import_sparse_template(book)
+        return
+    new_state, warns = parse_template(data)
     if new_state is None:
         st.session_state["_tpl_msgs"] = warns
         return
@@ -2232,7 +2342,9 @@ def _cb_import_template():
                                      f"блоков — {len(new_state['blocks_df'])}."] + warns
 
 
-EMPTY_TEMPLATE_BYTES = None  # собирается при первом обращении
+@st.cache_data(show_spinner=False)
+def empty_sparse_template(names):
+    return sparse_excel.build_template(sparse_template_fields(), names)
 
 
 # ======================================================================
@@ -2302,24 +2414,23 @@ with st.sidebar:
                 st.rerun()
 
     with st.expander("Данные из Excel", icon=":material/table_view:"):
-        st.caption(
-            "Один файл заполняет все вкладки. Загрузка заменяет данные на экране; "
-            "сохранённые проекты не трогает. Проект сохранится под названием из файла."
-        )
-        if EMPTY_TEMPLATE_BYTES is None:
-            EMPTY_TEMPLATE_BYTES = build_template_bytes(None)
+        st.caption("Шаблон заполняет только указанные ненулевые значения. Названия УБ связывают данные с текущим проектом.")
+        _input_blocks = st.session_state.get("blocks_df", generate_default_table())
+        _input_names = tuple(_input_blocks["Название блока"].astype(str))
         st.download_button(
-            "Пустой шаблон", data=EMPTY_TEMPLATE_BYTES, file_name="Шаблон загрузки финмодели.xlsx",
+            "Скачать шаблон ввода", data=empty_sparse_template(_input_names or ("УБ 1",)),
+            file_name="Шаблон_ввода_финмодели.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch",
             icon=":material/download:",
         )
+        st.caption("Архив Excel сохраняет текущий проект целиком. При загрузке архива данные на экране заменяются.")
         try:
             _export_bytes = build_template_bytes(collect_template_data())
         except Exception:
             _export_bytes = None
         if _export_bytes:
             st.download_button(
-                "Текущий проект в шаблон", data=_export_bytes,
+                "Скачать архив проекта", data=_export_bytes,
                 file_name=f"{_slugify(st.session_state.get('project_name_input', 'проект'))} — шаблон.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", width="stretch",
                 icon=":material/download:",
@@ -2611,26 +2722,6 @@ for _store_name, _default_df in GZ_STORES:
 # ------------------------------------------------------------------
 # ВКЛАДКА 3: СМР — подвкладки «Данные ЭП», «Коробка A–E», «Паркинг», «G и Z»
 # ------------------------------------------------------------------
-STOPS_KEY = "__elevator_stops__"
-AREA_PARAMS = [
-    ("Общая площадь квартир (с летними, с коэф.), м2", "Общая площадь квартир (с коэф.)", "м²"),
-    ("Площадь коммерции, м2", "Площадь коммерции", "м²"),
-    ("Площадь кладовых в доме, м2", "Площадь кладовых", "м²"),
-    ("Площадь участка блока, га", "Площадь участка блока", "га"),
-]
-EP_ONLY_PARAMS = [
-    ("Кол-во секций, шт", "Секций (подъездов)", "шт"),
-    ("Кол-во квартир, шт", "Квартир", "шт"),
-    ("Кол-во лифтов, шт", "Лифтов", "шт"),
-    (STOPS_KEY, "Остановок лифтов (D.10.10)", "шт"),
-    ("Площадь застройки, м2", "Площадь застройки", "м²"),
-    ("Площадь фасада, м2", "Площадь фасада", "м²"),
-    ("Площадь остекления окон, м2", "Остекление окон", "м²"),
-    ("Площадь остекления лоджий, м2", "Остекление лоджий", "м²"),
-    ("Объем здания ниже 0, м3", "Объём ниже 0", "м³"),
-    ("Объем здания выше 0, м3", "Объём выше 0", "м³"),
-]
-PARKING_TEP_KEYS = {"Площадь коммерции, м2", "Площадь кладовых в доме, м2", "Площадь участка блока, га"}
 
 
 def _tep_get(n, k):
