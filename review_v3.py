@@ -3,7 +3,6 @@ from uuid import uuid4
 from copy import deepcopy
 import math
 import re
-from hashlib import blake2s
 from numbers import Real
 import numpy as np
 import pandas as pd
@@ -127,49 +126,82 @@ def _numeric_formats(frame, config):
             yield column, type_config
 
 
-def editor(st, data, **kwargs):
+def reset_editors(st):
+    st.session_state['_editor_generation'] = st.session_state.get('_editor_generation', 0) + 1
+    st.session_state.pop('_dynamic_editor_sources', None)
+
+
+def _table_values(frame, columns):
+    return tuple(
+        tuple(None if pd.isna(value) else value for value in row)
+        for row in frame[columns].itertuples(index=False, name=None)
+    )
+
+
+def editor(st, data, *, row_identity=None, **kwargs):
     if not isinstance(data, pd.DataFrame):
         return st.data_editor(data, **kwargs)
     config = _column_config(data, kwargs.pop('column_config', None), kwargs.get('disabled', []))
     fields = dict(_numeric_formats(data, config))
-    view = data.copy()
+    key = kwargs.get('key', 'table')
+    generation = st.session_state.get('_editor_generation', 0)
+    widget_key = f'{key}_{generation}'
+    if row_identity is not None:
+        widget_key += '_' + str(tuple(row_identity))
+
+    # Dynamic grids use their input data as part of the Streamlit widget identity.
+    # Keep a stable baseline while the frontend submits edits against those rows.
+    dynamic = kwargs.get('num_rows') == 'dynamic'
+    if dynamic:
+        dynamic_sources = st.session_state.setdefault('_dynamic_editor_sources', {})
+        editable = [
+            column for column in data
+            if config.get(column) is not None
+            and not config[column].get('disabled')
+            and column not in (kwargs.get('disabled') or ())
+        ]
+        current = _table_values(data, editable)
+        source = dynamic_sources.get(key)
+        if source is None or source['expected'] != current or source['columns'] != editable:
+            source = {'data': data.copy(), 'expected': current, 'columns': editable, 'id': str(uuid4())}
+            dynamic_sources[key] = source
+        original_frame = source['data']
+        widget_key += '_' + source['id']
+    else:
+        original_frame = data
+
+    view = original_frame.copy()
     for column in fields:
         view[column] = pd.Series(
-            [None if pd.isna(value) else format_number(float(value)) for value in data[column]],
-            index=data.index, dtype="string",
+            [None if pd.isna(value) else format_number(float(value)) for value in original_frame[column]],
+            index=original_frame.index, dtype="string",
         )
         settings = config[column]
         settings['alignment'] = 'right'
-        settings['type_config'] = {
-            'type': 'text',
-            'validate': NUMBER_INPUT,
-        }
-    key = kwargs.get('key', 'table')
-    if fields:
-        # Refresh displayed precision after a committed edit, even if the grid keeps its edit state.
-        version = blake2s(repr(data.to_dict('split')).encode(), digest_size=8).hexdigest()
-        kwargs['key'] = f'{key}_{version}'
+        settings['type_config'] = {'type': 'text', 'validate': NUMBER_INPUT}
+
+    kwargs['key'] = widget_key
     with st.container(key='manual_table_'+re.sub(r'\W','_',str(key))):
         edited = st.data_editor(view, column_config=config, **kwargs)
         for column, rules in fields.items():
             lower, upper = rules.get('min_value'), rules.get('max_value')
             parsed = []
             for index, value in edited[column].items():
-                original = data.at[index, column] if index in data.index else None
+                original = original_frame.at[index, column] if index in original_frame.index else None
                 shown = view.at[index, column] if index in view.index else None
                 if pd.isna(value) or value == '':
                     parsed.append(original if pd.isna(shown) else None)
                     continue
-                if value == shown:
+                if pd.notna(shown) and value == shown:
                     parsed.append(original)
                     continue
-                value = value.strip()
+                value = str(value).strip()
                 raw = re.sub(r'[ \u00a0\u202f]', '', value).replace(',', '.')
                 entered = float(raw) if re.fullmatch(NUMBER_INPUT, value) else math.nan
                 if (not math.isfinite(entered) or (lower is not None and entered < lower)
                         or (upper is not None and entered > upper)):
                     st.warning(f'«{config[column]["label"][2:]}»: проверьте допустимый диапазон числа.')
-                    parsed.append(original)
+                    parsed.append(data.at[index, column] if index in data.index else original)
                 else:
                     parsed.append(entered)
             dtype = data[column].dtype
@@ -179,6 +211,13 @@ def editor(st, data, **kwargs):
                 if pd.api.types.is_float_dtype(dtype) or (series.notna().all() and (series % 1 == 0).all()):
                     series = series.astype(dtype)
             edited[column] = series
+    if dynamic:
+        changes = st.session_state[widget_key]
+        if changes['added_rows'] or changes['deleted_rows']:
+            dynamic_sources.pop(key)
+            st.session_state['_refresh_after_row_change'] = True
+        else:
+            source['expected'] = _table_values(edited, editable)
     return edited
 
 
@@ -230,7 +269,7 @@ def render_geometry(st, name):
     )
     old=st.session_state.mp_sections[name]
     edited=editor(st,old,key='mp_geometry_'+name,num_rows='dynamic',hide_index=True,width='stretch',column_config={c:st.column_config.NumberColumn(min_value=0) for c in SECTION_COLS[1:]})
-    if not edited.equals(old):st.session_state.mp_sections[name]=edited;st.rerun()
+    st.session_state.mp_sections[name] = edited
     totals,issues=geometry(edited.to_dict('records'))
     labels = {
         'MP_FOOTPRINT': 'Застройка, м²', 'MP_UNDERGROUND': 'Подземная часть, м²',
@@ -248,7 +287,7 @@ def render_ep_volumes(st,names,params,get,set_):
     ]
     config = {col: st.column_config.NumberColumn(name, min_value=0) for col, name in columns.items()}
     edited = editor(
-        st, pd.DataFrame(records), key='ep_common_volumes', hide_index=True, width='stretch',
+        st, pd.DataFrame(records), key='ep_common_volumes', row_identity=names, hide_index=True, width='stretch',
         disabled=['Параметр', 'Ед.'], column_config=config,
     )
     for i, (key, _, _) in enumerate(params):
@@ -277,12 +316,15 @@ def render_details(st, name):
     if len(old):
         view=old[cols].copy();view.insert(4,'Ед.',old['Категория'].map(lambda c:DETAIL_SPEC.get(c,('',''))[1]))
         view['Убрать']=False
-        ed=editor(st,view.drop(columns='ID'),key='facade_volumes_v3_'+name,hide_index=True,width='stretch',num_rows='fixed',disabled=['Категория','Тип','Ед.'],column_config={'Объем':st.column_config.NumberColumn(min_value=0)})
+        ed=editor(st,view.drop(columns='ID'),key='facade_volumes_v3_'+name,row_identity=old['ID'],hide_index=True,width='stretch',num_rows='fixed',disabled=['Категория','Тип','Ед.'],column_config={'Объем':st.column_config.NumberColumn(min_value=0)})
         updated=old.copy()
         for i in old.index:
             updated.at[i,'Объем']=number(ed.at[i,'Объем']);updated.at[i,'Тип / материал / размеры']=str(ed.at[i,'Тип / материал / размеры'] or '')
         updated=updated.loc[~ed['Убрать'].astype(bool)].reset_index(drop=True)
-        if not updated.equals(old):st.session_state.ep_details[name]=updated;st.rerun()
+        st.session_state.ep_details[name] = updated
+        if len(updated) != len(old):
+            st.session_state['_refresh_after_row_change'] = True
+        old = updated
     else:st.info('Разбивка не задана: B20.10 считается укрупнённо по общей площади фасада.')
     c1,c2=st.columns([3,1])
     with c1:category=st.selectbox('Элемент',list(DETAIL_SPEC),key='new_facade_category_'+name)
@@ -339,7 +381,7 @@ def render_rates(st, items, mp, names, qty, override_rates, group_labels, fmt_ml
         missing = view['База'].gt(0) ^ view[RATE].gt(0)
         view = view[missing]
     if len(view):
-        ed=editor(st,view,key=f'rates3_{mp}_{name}_{group}',hide_index=True,width='stretch',disabled=[c for c in view if c!=RATE],column_config={RATE:st.column_config.NumberColumn(min_value=0)})
+        ed=editor(st,view,key=f'rates3_{mp}_{name}_{group}',row_identity=view['Код'],hide_index=True,width='stretch',disabled=[c for c in view if c!=RATE],column_config={RATE:st.column_config.NumberColumn(min_value=0)})
         updated=old.copy()
         for _,row in ed.iterrows():updated.loc[updated['Код']==row['Код'],RATE]=number(row[RATE])
         if not updated.equals(old):st.session_state[store][name]=updated;st.rerun()
@@ -370,7 +412,7 @@ def render_rates(st, items, mp, names, qty, override_rates, group_labels, fmt_ml
                 st.rerun()
         elif len(details):
             cols = ['Категория', 'Тип', 'Тип / материал / размеры', 'Объем', RATE, 'Статус']
-            ed = editor(st, details[cols], key='facade_rates3_' + name, hide_index=True, width='stretch',
+            ed = editor(st, details[cols], key='facade_rates3_' + name, row_identity=details['ID'], hide_index=True, width='stretch',
                         disabled=cols[:4], column_config={
                             RATE: st.column_config.NumberColumn(min_value=0),
                             'Статус': st.column_config.SelectboxColumn(options=STATUSES, required=True),
@@ -402,18 +444,19 @@ def render_rates(st, items, mp, names, qty, override_rates, group_labels, fmt_ml
         ed=editor(st,comments,key=f'comments3_{mp}_{name}_{group}',hide_index=True,width='stretch',disabled=['Код','Статья затрат'])
         updated=old.copy()
         for _,row in ed.iterrows():updated.loc[updated['Код']==row['Код'],COMMENT]=str(row[COMMENT] or '')
-        if not updated.equals(old):st.session_state[store][name]=updated;st.rerun()
+        st.session_state[store][name] = updated
     with st.expander('Копировать ставки A–E в другие блоки'):
         targets=st.multiselect('Блоки назначения',[n for n in names if n!=name],key=f'copy_rates3_{mp}')
         if st.button('Копировать ставки',key=f'copy_rates3_btn_{mp}',disabled=not targets):
             for target in targets:st.session_state[store][target]=st.session_state[store][name].copy()
+            reset_editors(st)
             st.rerun()
     return name
 
 
 def add_review_report(wb,ss,blocks,items,mp,item_costs,qty,factor,helper,colmap,first_row,leaf_formula,g_area,g_length,z_pct,z_fixed):
     """Reader layouts over the actual model. Never creates demonstration inputs."""
-    names=list(blocks['Название блока']);res=list(ss.block_rates)
+    names=list(blocks['Название блока']);res=list(ss["block_rates"])
     factor_ref=f"'{helper}'!$E$4"
     def init(name, headers):
         ws = wb.create_sheet(name)
@@ -431,12 +474,12 @@ def add_review_report(wb,ss,blocks,items,mp,item_costs,qty,factor,helper,colmap,
     fac=init('Элементы B20.10',['🔒 Блок','🔒 Код','🔒 Элемент','🔒 Тип','🔒 Уточнение','🔒 Ед.','🔒 Объём','🔒 Ставка, руб./ед.','🔒 Статус','🔒 Сумма без сценария, руб','🔒 Со сценарием, руб'])
     facade_parent={};detail_source={}
     for name in names:
-        if name not in ss.ep_details:continue
+        if name not in ss["ep_details"]:continue
         if facade_parent:fac.append(['']);fac.row_dimensions[fac.max_row].height=14
         parent=fac.max_row+1;facade_parent[name]=parent
-        details=ss.ep_details[name];mode=ss.facade_modes[name]
-        rate=number(ss.block_rates[name].set_index('Код')[RATE].get('B.20.10'))
-        area=number(ss.tep_store[name].get('Площадь фасада, м2'))
+        details=ss["ep_details"][name];mode=ss["facade_modes"][name]
+        rate=number(ss["block_rates"][name].set_index('Код')[RATE].get('B.20.10'))
+        area=number(ss["tep_store"][name].get('Площадь фасада, м2'))
         amount,issues=active_facade_cost(details.to_dict('records'),area,rate,mode)
         fac.append([name,'B20.10','Наружные стены и фасадные элементы',mode,'Частичная сумма' if issues else '', 'м² фасада',area,rate,'Нет данных' if issues else 'Рассчитан',None,f'=J{parent}*{factor_ref}'])
         start=parent+1
@@ -456,10 +499,10 @@ def add_review_report(wb,ss,blocks,items,mp,item_costs,qty,factor,helper,colmap,
     det=wb['Детализация ЭП'];counters={}
     for r in range(2,det.max_row+1):
         name=det.cell(r,1).value
-        if name not in ss.ep_details:continue
+        if name not in ss["ep_details"]:continue
         idx=counters.get(name,0);counters[name]=idx+1
-        if idx<len(ss.ep_details[name].loc[ss.ep_details[name]['Категория'].isin(DETAIL_SPEC)]):
-            key=(name,str(ss.ep_details[name].loc[ss.ep_details[name]['Категория'].isin(DETAIL_SPEC)].iloc[idx]['ID']));source=detail_source.get(key)
+        if idx<len(ss["ep_details"][name].loc[ss["ep_details"][name]['Категория'].isin(DETAIL_SPEC)]):
+            key=(name,str(ss["ep_details"][name].loc[ss["ep_details"][name]['Категория'].isin(DETAIL_SPEC)].iloc[idx]['ID']));source=detail_source.get(key)
             if source:det.cell(r,8,f"='Элементы B20.10'!J{source}")
     # Common article list; each block is a separate horizontal section with a gutter.
     headers=['🔒 Код','🔒 Статья затрат','🔒 Группа','']
@@ -476,8 +519,8 @@ def add_review_report(wb,ss,blocks,items,mp,item_costs,qty,factor,helper,colmap,
             start=5+i*6;rate=0.;volume=0.;comment='';amount=0.;u=unit
             if kind=='AE' and name in ss[store]:
                 rr=ss[store][name].set_index('Код').loc[code];rate=number(rr[RATE]);comment=str(rr.get(COMMENT,'') or '');volume=float(qty[code][i]);amount=f'={xlcol(start+1)}{row}*{xlcol(start+2)}{row}*{factor_ref}'
-                if code=='D.30.20':u=ss.thermal_kind[name]+', компл.'
-                if code=='B.20.10':amount=f"='Элементы B20.10'!K{facade_parent[name]}";comment=(comment+' · '+ss.facade_modes[name]).strip(' ·')
+                if code=='D.30.20':u=ss["thermal_kind"][name]+', компл.'
+                if code=='B.20.10':amount=f"='Элементы B20.10'!K{facade_parent[name]}";comment=(comment+' · '+ss["facade_modes"][name]).strip(' ·')
             elif kind.startswith('G_') or kind.startswith('Z_'):
                 amount=leaf_formula((kind,code),name)
                 key={'G_AREA':'block_g_area','G_LENGTH':'block_g_length','Z_PCT':'block_z_pct','Z_FIXED':'block_z_fixed'}[kind]
@@ -487,7 +530,7 @@ def add_review_report(wb,ss,blocks,items,mp,item_costs,qty,factor,helper,colmap,
                 elif kind=='Z_PCT':rate=number(rr['Ставка, доля от СМР+G']);volume='СМР+G+паркинг'
                 else:volume=1;rate=number(rr.get('Сумма, руб'))
             elif kind=='INFRA':
-                volume=1;rate=float(pd.to_numeric(ss.block_infra[name]['Сумма, руб'],errors='coerce').fillna(0).sum());amount=f'={xlcol(start+2)}{row}*{factor_ref}';comment='Расшифровка: «Инфраструктура — состав»'
+                volume=1;rate=float(pd.to_numeric(ss["block_infra"][name]['Сумма, руб'],errors='coerce').fillna(0).sum());amount=f'={xlcol(start+2)}{row}*{factor_ref}';comment='Расшифровка: «Инфраструктура — состав»'
             elif kind=='PARK':
                 volume=1
                 block=matrix.loc[name]
@@ -508,11 +551,11 @@ def add_review_report(wb,ss,blocks,items,mp,item_costs,qty,factor,helper,colmap,
     budget.column_dimensions['D'].width=3;budget.sheet_properties.outlinePr.summaryRight=True
     # General block areas only: equipment remains in the article budget.
     bl=init('Блоки',['🔒 Блок','🔒 Тип','🔒 Квартиры, м²','🔒 Коммерция, м²','🔒 Кладовые, м²','🔒 NSA, м²','🔒 Участок, га','🔒 Квартир, шт.'])
-    for _,b in blocks.iterrows():bl.append([b['Название блока'],b['Тип блока'],b['S квартир, м2'],b['S коммерции 1 эт., м2'],b['S кладовых, м2'],b['NSA, м2'],b['Площадь участка блока, га'],number(ss.tep_store.get(b['Название блока'],{}).get('Кол-во квартир, шт'))])
+    for _,b in blocks.iterrows():bl.append([b['Название блока'],b['Тип блока'],b['S квартир, м2'],b['S коммерции 1 эт., м2'],b['S кладовых, м2'],b['NSA, м2'],b['Площадь участка блока, га'],number(ss["tep_store"].get(b['Название блока'],{}).get('Кол-во квартир, шт'))])
     finish(bl)
     ind=init('Косвенные',['🔒 Раздел','🔒 Статья','🔒 База / способ','🔒 Объём','🔒 Ставка / сумма, руб','🔒 Со сценарием, руб']+[f'🔒 {n}, руб' for n in names]);parents=[]
     indirect_labels={'land':'Земля','landscape':'Благоустройство мест общего пользования','infra':'Магистральные сети','social':'Социальные объекты','soft':'Прочие Soft Costs'}
-    for category_key,frame in ss.indirect_items.items():
+    for category_key,frame in ss["indirect_items"].items():
         category=indirect_labels.get(category_key,category_key)
         parent=ind.max_row+1;parents.append(parent);ind.append([category,'Итого раздела','',None,None,None]);start=parent+1
         for _,r in frame.iterrows():
