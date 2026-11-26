@@ -63,7 +63,7 @@ def test_excluded_g_parking_and_infrastructure_code_is_unchanged():
 
 
 CAPTURE='''
-st.session_state['_capture'] = dict(excel=excel_bytes, template=build_template_bytes(collect_template_data()),
+st.session_state['_capture'] = dict(excel=report_download()(), template=archive_download(),
     box=smr_korobka_raw.tolist(), item={k:v.tolist() for k,v in item_cost_matrix.items()},
     g=g_block_total.tolist(), z=z_block_total.tolist(), base=zg_base.tolist(),
     quantity={k:v.tolist() for k,v in qty_by_basis.items()}, cost_factor=cost_factor,
